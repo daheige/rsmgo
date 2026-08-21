@@ -48,4 +48,9 @@ go.work.sum
 node_modules
 share/
 rgo-control
-web/.next/cache
+
+# Next.js build output
+web/.next/
+
+# Tauri build output
+desktop/src-tauri/target/
