@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package rsmgo.v1;
+
+option go_package = "github.com/daheige/rsmgo/pb";
+
+service Engine {
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Chat with the agent (non-streaming)
+  rpc Chat(ChatRequest) returns (ChatResponse);
+
+  // Chat with the agent (server-side streaming)
+  rpc ChatStream(ChatRequest) returns (stream ChatStreamChunk);
+
+  // List available models
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
+  // Execute a tool directly
+  rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+
+  // List registered tools
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+}
+
+message HealthRequest {}
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+message Message {
+  string role = 1;      // system / user / assistant / tool
+  string content = 2;
+  string tool_call_id = 3; // optional, for tool role
+  repeated ToolCall tool_calls = 4; // optional, for assistant role with tool calls
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments = 3; // JSON object
+}
+
+message ChatRequest {
+  string session_id = 1;
+  repeated Message messages = 2;
+  string provider = 3;  // e.g. openai, anthropic
+  string model = 4;
+  repeated string tool_names = 5;
+  bool stream = 6;
+}
+
+message ChatResponse {
+  string session_id = 1;
+  Message message = 2;
+  repeated ToolCall tool_calls = 3;
+  Usage usage = 4;
+}
+
+message ChatStreamChunk {
+  string session_id = 1;
+  string delta = 2;
+  bool done = 3;
+  Message message = 4;  // final message when done
+  repeated ToolCall tool_calls = 5;
+}
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+}
+
+message ListModelsRequest {
+  string provider = 1;
+}
+
+message ModelInfo {
+  string id = 1;
+  string provider = 2;
+  string display_name = 3;
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message ExecuteToolRequest {
+  string name = 1;
+  string arguments = 2; // JSON object
+}
+
+message ExecuteToolResponse {
+  bool success = 1;
+  string output = 2;
+  string error = 3;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string parameters_schema = 3; // JSON schema
+}
+
+message ListToolsRequest {}
+message ListToolsResponse {
+  repeated ToolInfo tools = 1;
+}

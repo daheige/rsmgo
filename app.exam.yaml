@@ -1,0 +1,80 @@
+app:
+  name: rsmgo
+  version: 0.1.0
+
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  # Data directory for memory and session storage.
+  # Supports ~ for home directory.
+  data_dir: "./share/rsmgo"
+  # Optional override of the default system prompt.
+  system_prompt: |
+    "You are rsmgo, a model-agnostic AI agent assistant. You can use tools when helpful.
+    When you need to perform actions on the user's machine, emit tool calls with precise arguments.
+    Always prefer safe, read-only operations unless the user explicitly asks for changes."
+
+providers:
+  # - name: openai
+  #   api_key: "${OPENAI_API_KEY}"
+  #   base_url: "https://api.openai.com/v1"
+  #   default_model: "gpt-4o-mini"
+  #   models:
+  #     - id: "gpt-4o"
+  #       display_name: "GPT-4o"
+  #     - id: "gpt-4o-mini"
+  #       display_name: "GPT-4o Mini"
+
+  # - name: anthropic
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   base_url: "https://api.anthropic.com/v1"
+  #   default_model: "claude-sonnet-4-5-20251001"
+  #   models:
+  #     - id: "claude-opus-5-20251101"
+  #       display_name: "Claude Opus 5"
+  #     - id: "claude-sonnet-4-5-20251001"
+  #       display_name: "Claude Sonnet 4.5"
+  #     - id: "claude-haiku-4-5-20251001"
+  #       display_name: "Claude Haiku 4.5"
+
+  - name: deepseek
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "https://api.deepseek.com"
+    default_model: "deepseek-chat"
+    models:
+      - id: "deepseek-chat"
+        display_name: "DeepSeek V3"
+      - id: "deepseek-reasoner"
+        display_name: "DeepSeek R1"
+
+  # - name: qwen
+  #   api_key: "${DASHSCOPE_API_KEY}"
+  #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #   default_model: "qwen-max"
+  #   models:
+  #     - id: "qwen-max"
+  #       display_name: "Qwen Max"
+  #     - id: "qwen-plus"
+  #       display_name: "Qwen Plus"
+
+  # - name: kimi
+  #   api_key: "${MOONSHOT_API_KEY}"
+  #   base_url: "https://api.moonshot.cn/v1"
+  #   default_model: "kimi-latest"
+  #   models:
+  #     - id: "kimi-latest"
+  #       display_name: "Kimi Latest"
+  #     - id: "kimi-k2-0711-preview"
+  #       display_name: "Kimi K2"
+
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - execute_command
+    - list_directory
+    - search
+
+control_plane:
+  addr: ":9090"
+  engine_addr: "127.0.0.1:50051"
