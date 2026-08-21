@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod web;
 
 use crate::error::{Result, RsmgoError};
 pub use crate::types::ToolDefinition;
@@ -68,6 +69,8 @@ impl Default for ToolRegistry {
         registry.register(Box::new(builtin::ExecuteCommandTool));
         registry.register(Box::new(builtin::ListDirectoryTool));
         registry.register(Box::new(builtin::SearchTool));
+        registry.register(Box::new(web::WebSearchTool));
+        registry.register(Box::new(web::FetchUrlTool));
         registry
     }
 }

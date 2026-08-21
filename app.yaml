@@ -74,6 +74,8 @@ tools:
     - execute_command
     - list_directory
     - search
+    - web_search
+    - fetch_url
 
 control_plane:
   addr: ":9090"

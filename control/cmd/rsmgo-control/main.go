@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"path/filepath"
 
 	"github.com/daheige/rsmgo/control/internal/api"
 	"github.com/daheige/rsmgo/control/internal/config"
@@ -22,8 +23,9 @@ func main() {
 	defer engineClient.Close()
 
 	sessionStore := session.NewStore(cfg.DataDir)
+	uploadDir := filepath.Join(cfg.DataDir, "uploads")
 
-	server := api.NewServer(engineClient, sessionStore, cfg.Providers)
+	server := api.NewServer(engineClient, sessionStore, cfg.Providers, uploadDir)
 	log.Printf("rsmgo control plane listening on %s", cfg.Addr)
 	if err := server.Run(cfg.Addr); err != nil {
 		log.Fatalf("server error: %v", err)

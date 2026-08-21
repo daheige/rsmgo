@@ -51,6 +51,8 @@ rgo-control
 
 # Next.js build output
 web/.next/
+*.tsbuildinfo
 
 # Tauri build output
 desktop/src-tauri/target/
+app.exam.yaml

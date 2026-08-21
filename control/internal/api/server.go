@@ -2,8 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/daheige/rsmgo/control/internal/engine"
 	"github.com/daheige/rsmgo/control/internal/session"
@@ -18,9 +25,10 @@ type Server struct {
 	router          *gin.Engine
 	providers       []string
 	defaultProvider string
+	uploadDir       string
 }
 
-func NewServer(engineClient *engine.Client, store *session.Store, providers []string) *Server {
+func NewServer(engineClient *engine.Client, store *session.Store, providers []string, uploadDir string) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -31,12 +39,15 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 		defaultProvider = providers[0]
 	}
 
+	_ = os.MkdirAll(uploadDir, 0o755)
+
 	s := &Server{
 		engine:          engineClient,
 		sessions:        store,
 		router:          r,
 		providers:       providers,
 		defaultProvider: defaultProvider,
+		uploadDir:       uploadDir,
 	}
 	s.registerRoutes()
 	return s
@@ -50,8 +61,11 @@ func (s *Server) registerRoutes() {
 	s.router.GET("/api/v1/sessions", s.listSessions)
 	s.router.POST("/api/v1/sessions", s.createSession)
 	s.router.GET("/api/v1/sessions/:id", s.getSession)
+	s.router.PATCH("/api/v1/sessions/:id", s.updateSession)
 	s.router.POST("/api/v1/sessions/:id/chat", s.chat)
 	s.router.DELETE("/api/v1/sessions/:id", s.deleteSession)
+	s.router.POST("/api/v1/uploads", s.uploadFile)
+	s.router.GET("/api/v1/uploads/:id", s.downloadFile)
 }
 
 func (s *Server) Run(addr string) error {
@@ -177,8 +191,47 @@ func (s *Server) deleteSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
+type updateSessionRequest struct {
+	Title  *string `json:"title"`
+	Pinned *bool   `json:"pinned"`
+}
+
+func (s *Server) updateSession(c *gin.Context) {
+	id := c.Param("id")
+	var req updateSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Title == nil && req.Pinned == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "nothing to update"})
+		return
+	}
+
+	sess, err := s.sessions.Patch(id, func(s *session.Session) error {
+		if req.Title != nil {
+			s.Title = strings.TrimSpace(*req.Title)
+			if s.Title == "" {
+				s.Title = "New chat"
+			}
+		}
+		if req.Pinned != nil {
+			s.Pinned = *req.Pinned
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
+	c.JSON(http.StatusOK, sess)
+}
+
 type chatRequest struct {
-	Content string `json:"content"`
+	Content       string   `json:"content"`
+	ToolNames     []string `json:"tool_names"`
+	WebSearch     bool     `json:"web_search"`
+	AttachmentIDs []string `json:"attachment_ids"`
 }
 
 func (s *Server) chat(c *gin.Context) {
@@ -194,15 +247,22 @@ func (s *Server) chat(c *gin.Context) {
 		return
 	}
 
+	content := s.withAttachments(req.Content, req.AttachmentIDs)
+
 	sess.Messages = append(sess.Messages, session.Message{
 		Role:    "user",
-		Content: req.Content,
+		Content: content,
 		SentAt:  time.Now().UTC(),
 	})
 
 	pbMessages := make([]*pb.Message, 0, len(sess.Messages))
 	for _, m := range sess.Messages {
 		pbMessages = append(pbMessages, &pb.Message{Role: m.Role, Content: m.Content})
+	}
+
+	toolNames := append([]string{}, req.ToolNames...)
+	if req.WebSearch && !contains(toolNames, "web_search") {
+		toolNames = append(toolNames, "web_search")
 	}
 
 	ctx, cancel := contextWithTimeout(120)
@@ -212,6 +272,7 @@ func (s *Server) chat(c *gin.Context) {
 		Messages:  pbMessages,
 		Provider:  sess.Provider,
 		Model:     sess.Model,
+		ToolNames: toolNames,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -227,6 +288,153 @@ func (s *Server) chat(c *gin.Context) {
 	}
 	_ = s.sessions.Update(sess)
 	c.JSON(http.StatusOK, resp)
+}
+
+func contains(items []string, target string) bool {
+	for _, it := range items {
+		if it == target {
+			return true
+		}
+	}
+	return false
+}
+
+// attachmentMeta describes a stored upload. The file bytes live at
+// uploadDir/<id> and the metadata at uploadDir/<id>.json.
+type attachmentMeta struct {
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+}
+
+func (s *Server) uploadFile(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "expected multipart file field 'file'"})
+		return
+	}
+	defer file.Close()
+
+	id := uuid.New().String()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	meta := attachmentMeta{
+		Name:        header.Filename,
+		ContentType: header.Header.Get("Content-Type"),
+		Size:        header.Size,
+	}
+	metaBytes, _ := json.Marshal(meta)
+
+	if err := os.WriteFile(filepath.Join(s.uploadDir, id), data, 0o644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := os.WriteFile(filepath.Join(s.uploadDir, id+".json"), metaBytes, 0o644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":           id,
+		"name":         meta.Name,
+		"content_type": meta.ContentType,
+		"size":         meta.Size,
+	})
+}
+
+func (s *Server) downloadFile(c *gin.Context) {
+	id := c.Param("id")
+	meta, data, err := s.loadAttachment(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "attachment not found"})
+		return
+	}
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Data(http.StatusOK, contentType, data)
+}
+
+func (s *Server) loadAttachment(id string) (attachmentMeta, []byte, error) {
+	metaBytes, err := os.ReadFile(filepath.Join(s.uploadDir, id+".json"))
+	if err != nil {
+		return attachmentMeta{}, nil, err
+	}
+	var meta attachmentMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return attachmentMeta{}, nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(s.uploadDir, id))
+	if err != nil {
+		return attachmentMeta{}, nil, err
+	}
+	return meta, data, nil
+}
+
+// withAttachments appends a readable representation of each attachment to the
+// user's message so the model can see it. Text-like files are inlined (up to a
+// cap); binary files are described by name and size.
+func (s *Server) withAttachments(content string, ids []string) string {
+	if len(ids) == 0 {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString(content)
+	for _, id := range ids {
+		meta, data, err := s.loadAttachment(id)
+		if err != nil {
+			continue
+		}
+		b.WriteString("\n\n[Attached file: ")
+		b.WriteString(meta.Name)
+		b.WriteString("]")
+		if isTextContent(meta.ContentType) || looksText(data) {
+			const capBytes = 8000
+			text := string(data)
+			if len(text) > capBytes {
+				cut := capBytes
+				for cut > 0 && !utf8.RuneStart(text[cut]) {
+					cut--
+				}
+				text = text[:cut] + "\n...(truncated)"
+			}
+			b.WriteString("\n```\n")
+			b.WriteString(text)
+			b.WriteString("\n```")
+		} else {
+			b.WriteString(" (binary file, ")
+			b.WriteString(strconv.FormatInt(meta.Size, 10))
+			b.WriteString(" bytes)")
+		}
+	}
+	return b.String()
+}
+
+func isTextContent(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/") ||
+		strings.Contains(contentType, "json") ||
+		strings.Contains(contentType, "xml") ||
+		strings.Contains(contentType, "javascript") ||
+		strings.Contains(contentType, "csv") ||
+		strings.Contains(contentType, "yaml") ||
+		strings.Contains(contentType, "markdown")
+}
+
+func looksText(data []byte) bool {
+	if !utf8.Valid(data) {
+		return false
+	}
+	for _, b := range data {
+		if b == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func contextWithTimeout(seconds ...int) (context.Context, context.CancelFunc) {

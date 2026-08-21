@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -15,6 +16,7 @@ type Session struct {
 	Provider  string    `json:"provider"`
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
+	Pinned    bool      `json:"pinned"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -57,6 +59,11 @@ func (s *Store) Create(sess *Session) error {
 func (s *Store) Get(id string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.read(id)
+}
+
+// read loads a session without taking a lock. Callers must hold s.mu.
+func (s *Store) read(id string) (*Session, error) {
 	data, err := os.ReadFile(s.path(id))
 	if err != nil {
 		return nil, err
@@ -91,6 +98,28 @@ func (s *Store) Delete(id string) error {
 	return os.Remove(s.path(id))
 }
 
+// Patch loads a session, applies the mutation, and persists the result.
+func (s *Store) Patch(id string, mutate func(*Session) error) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.read(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := mutate(sess); err != nil {
+		return nil, err
+	}
+	sess.UpdatedAt = time.Now().UTC()
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(s.path(sess.ID), data, 0o644); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
 func (s *Store) List() ([]*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -113,5 +142,11 @@ func (s *Store) List() ([]*Session, error) {
 		}
 		sessions = append(sessions, &sess)
 	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].Pinned != sessions[j].Pinned {
+			return sessions[i].Pinned
+		}
+		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	})
 	return sessions, nil
 }
