@@ -57,15 +57,17 @@ providers:
   #     - id: "qwen-plus"
   #       display_name: "Qwen Plus"
 
-  # - name: kimi
-  #   api_key: "${MOONSHOT_API_KEY}"
-  #   base_url: "https://api.moonshot.cn/v1"
-  #   default_model: "kimi-latest"
-  #   models:
-  #     - id: "kimi-latest"
-  #       display_name: "Kimi Latest"
-  #     - id: "kimi-k2-0711-preview"
-  #       display_name: "Kimi K2"
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "kimi-k2.6"
+    models:
+      - id: "kimi-k2.6"
+        display_name: "kimi-k2.6"
+      - id: "kimi-k2.5"
+        display_name: "kimi-k2.5"
+      - id: "kimi-k3"
+        display_name: "kimi-k3"
 
 tools:
   enabled:

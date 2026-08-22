@@ -23,6 +23,18 @@ pub struct Message {
     /// optional, for assistant role with tool calls
     #[prost(message, repeated, tag = "4")]
     pub tool_calls: ::prost::alloc::vec::Vec<ToolCall>,
+    /// optional, for multimodal (vision/file) content
+    #[prost(message, repeated, tag = "5")]
+    pub parts: ::prost::alloc::vec::Vec<MultiModalPart>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MultiModalPart {
+    /// e.g. image/png, image/jpeg
+    #[prost(string, tag = "1")]
+    pub content_type: ::prost::alloc::string::String,
+    /// base64-encoded bytes
+    #[prost(string, tag = "2")]
+    pub data: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ToolCall {

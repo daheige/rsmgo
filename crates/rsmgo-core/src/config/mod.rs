@@ -28,6 +28,10 @@ pub struct EngineConfig {
     pub data_dir: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// When true, also serve a small HTTP/JSON debug API on `http_addr`.
+    /// Defaults to false (gRPC-only); opt in for local curl debugging.
+    #[serde(default)]
+    pub app_http_debug: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

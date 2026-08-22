@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr: SocketAddr = config.engine.grpc_addr.parse()?;
     let http_addr: SocketAddr = config.engine.http_addr.parse()?;
 
-    rsmgo_core::server::run_server(agent, grpc_addr, http_addr).await?;
+    rsmgo_core::server::run_server(agent, grpc_addr, http_addr, config.engine.app_http_debug)
+        .await?;
     Ok(())
 }

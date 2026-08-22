@@ -53,13 +53,16 @@ impl MemoryStore {
                 content TEXT NOT NULL,
                 tool_call_id TEXT,
                 tool_calls TEXT,
+                parts TEXT,
                 created_at TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )",
             [],
         )?;
-        // Migration: add tool_calls column to existing databases.
+        // Migration: add columns to existing databases.
         conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT", [])
+            .ok();
+        conn.execute("ALTER TABLE messages ADD COLUMN parts TEXT", [])
             .ok();
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)",
@@ -131,16 +134,22 @@ impl MemoryStore {
             .tool_calls
             .as_ref()
             .map(|t| serde_json::to_string(t).unwrap_or_default());
+        let parts_json = if message.parts.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&message.parts).unwrap_or_default())
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, parts, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 &message.role,
                 &message.content,
                 message.tool_call_id.as_deref(),
                 tool_calls_json.as_deref(),
+                parts_json.as_deref(),
                 &now
             ],
         )?;
@@ -154,17 +163,22 @@ impl MemoryStore {
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
+            "SELECT role, content, tool_call_id, tool_calls, parts FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
         )?;
         let rows = stmt
             .query_map([session_id], |row| {
                 let tool_calls_raw: Option<String> = row.get(3)?;
                 let tool_calls = tool_calls_raw.and_then(|s| serde_json::from_str(&s).ok());
+                let parts_raw: Option<String> = row.get(4)?;
+                let parts = parts_raw
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
                 Ok(Message {
                     role: row.get(0)?,
                     content: row.get(1)?,
                     tool_call_id: row.get(2)?,
                     tool_calls,
+                    parts,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;

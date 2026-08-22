@@ -138,7 +138,11 @@ fn parse_duckduckgo(html: &str) -> Vec<SearchResult> {
             .and_then(|i| {
                 let after = &seg[i + 1..];
                 let end = after.find("</a>")?;
-                Some(decode_entities(&strip_tags(&after[..end])).trim().to_string())
+                Some(
+                    decode_entities(&strip_tags(&after[..end]))
+                        .trim()
+                        .to_string(),
+                )
             })
             .unwrap_or_default();
 
@@ -157,7 +161,11 @@ fn parse_duckduckgo(html: &str) -> Vec<SearchResult> {
             .and_then(|i| {
                 let after = &seg[i + 1..];
                 let end = after.find("</a>")?;
-                Some(decode_entities(&strip_tags(&after[..end])).trim().to_string())
+                Some(
+                    decode_entities(&strip_tags(&after[..end]))
+                        .trim()
+                        .to_string(),
+                )
             })
             .unwrap_or_default();
         snippets.push(snippet);

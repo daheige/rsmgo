@@ -5,6 +5,9 @@ app:
 engine:
   grpc_addr: "127.0.0.1:50051"
   http_addr: "127.0.0.1:8080"
+  # When true, also serve a small HTTP/JSON debug API on http_addr.
+  # Defaults to false (gRPC-only); set to true for local curl debugging.
+  app_http_debug: false
   # Data directory for memory and session storage.
   # Supports ~ for home directory.
   data_dir: "./share/rsmgo"
@@ -47,6 +50,10 @@ providers:
       - id: "deepseek-reasoner"
         display_name: "DeepSeek R1"
 
+  # NOTE: image attachments are only sent to the model as multimodal content
+  # when the selected model is vision-capable. Text-only models (e.g.
+  # deepseek-chat) cannot see images. Use a vision model such as qwen-vl-max,
+  # qwen-vl-plus, or gpt-4o for image uploads.
   # - name: qwen
   #   api_key: "${DASHSCOPE_API_KEY}"
   #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -56,16 +63,32 @@ providers:
   #       display_name: "Qwen Max"
   #     - id: "qwen-plus"
   #       display_name: "Qwen Plus"
+  #     - id: "qwen-vl-max"
+  #       display_name: "Qwen VL Max (vision)"
+  #     - id: "qwen-vl-plus"
+  #       display_name: "Qwen VL Plus (vision)"
 
-  # - name: kimi
-  #   api_key: "${MOONSHOT_API_KEY}"
-  #   base_url: "https://api.moonshot.cn/v1"
-  #   default_model: "kimi-latest"
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "kimi-k2.6"
+    models:
+      - id: "kimi-k2.6"
+        display_name: "kimi-k2.6"
+      - id: "kimi-k2.5"
+        display_name: "kimi-k2.5"
+      - id: "kimi-k3"
+        display_name: "kimi-k3"
+
+  # - name: gemini
+  #   api_key: "${GEMINI_API_KEY}"
+  #   base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+  #   default_model: "gemini-2.5-flash"
   #   models:
-  #     - id: "kimi-latest"
-  #       display_name: "Kimi Latest"
-  #     - id: "kimi-k2-0711-preview"
-  #       display_name: "Kimi K2"
+  #     - id: "gemini-2.5-flash"
+  #       display_name: "Gemini 2.5 Flash"
+  #     - id: "gemini-2.5-pro"
+  #       display_name: "Gemini 2.5 Pro"
 
 tools:
   enabled:

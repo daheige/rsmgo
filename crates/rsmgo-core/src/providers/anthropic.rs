@@ -5,6 +5,7 @@ use crate::types::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
@@ -69,7 +70,29 @@ struct AnthropicChatRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
+}
+
+/// Build the Anthropic content field for a message. Plain text messages stay a
+/// string; messages carrying images become a content array of `text` and
+/// `image` (base64 source) blocks.
+fn anthropic_content(m: &Message) -> serde_json::Value {
+    if m.parts.is_empty() {
+        return serde_json::Value::String(m.content.clone());
+    }
+    let mut parts: Vec<serde_json::Value> =
+        vec![json!({ "type": "text", "text": m.content.clone() })];
+    for img in &m.parts {
+        parts.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.content_type.clone(),
+                "data": img.data.clone(),
+            }
+        }));
+    }
+    serde_json::Value::Array(parts)
 }
 
 #[derive(Debug, Serialize)]
@@ -129,7 +152,7 @@ impl LlmProvider for AnthropicProvider {
             .filter(|m| m.role != "system")
             .map(|m| AnthropicMessage {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: anthropic_content(m),
             })
             .collect();
 
@@ -200,6 +223,7 @@ impl LlmProvider for AnthropicProvider {
                 content: content_parts.join("\n"),
                 tool_call_id: None,
                 tool_calls: None,
+                parts: vec![],
             },
             tool_calls,
             usage: Usage {

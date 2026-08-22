@@ -16,6 +16,9 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - [目录结构](#目录结构)
 - [快速开始](#快速开始)
 - [配置文件](#配置文件)
+- [工具使用](#工具使用)
+- [常见问题与注意事项](#常见问题与注意事项)
+- [rsmgo http 服务调试](#rsmgo-http服务调试)
 - [组件说明](#组件说明)
 - [未来演化](#未来演化)
 - [许可证](#许可证)
@@ -27,7 +30,9 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - **模型无关（Model-agnostic）**：统一抽象 LLM Provider，支持 OpenAI、Anthropic、DeepSeek、通义千问、Kimi 等多种模型，新增提供商只需配置 `base_url` 与模型列表。
 - **Agent 运行时**：内置 ReAct 风格循环，模型可自主决定调用工具，工具结果自动回传并触发后续推理。
 - **记忆持久化**：基于 SQLite 存储会话（session）与消息历史，支持跨会话长期记忆。
-- **工具调用**：内置文件读写、命令执行、目录列出、文件搜索等常用工具，工具定义采用 JSON Schema，便于模型理解。
+- **工具调用**：内置文件读写、命令执行、目录列出、文件搜索、联网搜索、网页抓取等常用工具，工具定义采用 JSON Schema，便于模型理解。工具默认不启用，前端可手动勾选，避免普通聊天问题被强制触发工具调用。
+- **多模态附件**：支持上传图片、PDF、DOCX、文本等附件。图片会作为多模态内容发送给 vision 模型；文本与文档内容会提取后嵌入用户消息。
+- **DSML/XML 工具调用兼容**：部分 OpenAI 兼容模型（如 DeepSeek、Kimi）会把工具调用以 `<| | DSML | | tool_calls>` 形式输出到 content 中，引擎会自动解析并执行，最终只向用户展示模型总结后的答案。
 - **多协议接入**：核心引擎同时暴露 gRPC（高效内部通信）与 HTTP/JSON（便于前端与第三方接入）双协议。
 - **多客户端**：提供命令行 CLI、Next.js Web 界面、Tauri 桌面客户端三种交互方式。
 - **控制面网关**：Go 控制面负责会话管理、路由转发、CORS 与前端代理，解耦引擎与 UI。
@@ -70,6 +75,8 @@ graph TD
 1. **引擎层（rsmgo-core，Rust）**
    - 负责与 LLM 交互、工具编排、记忆读写、gRPC/HTTP 服务。
    - `Agent` 是编排核心：接收请求 → 补全历史记忆 → 调用 Provider → 如有 tool_calls 则执行工具 → 将结果再次提交给模型生成最终回复。
+   - 工具仅在请求中显式指定 `tool_names` 时才会暴露给模型；前端默认不勾选任何工具，普通聊天不会触发工具调用。
+   - 对于把工具调用以 DSML/XML 形式写入 `content` 的 OpenAI 兼容模型，引擎会解析该 markup、执行对应工具，并把原始 markup 从最终回复中剥离。
    - `ProviderRegistry` 支持运行时注册多家模型；Anthropic 走原生协议，其余默认按 OpenAI 兼容协议处理。
    - `MemoryStore` 基于 `rusqlite` 提供事务化会话与消息存储。
 
@@ -365,17 +372,21 @@ app:
 engine:
   grpc_addr: "127.0.0.1:50051"
   http_addr: "127.0.0.1:8080"
+  app_http_debug: true
   data_dir: "./share/rsmgo"
   system_prompt: |
     You are rsmgo, a model-agnostic AI agent assistant...
 ```
 
+- `grpc_addr`：引擎 gRPC 监听地址，是控制面（Go）与引擎之间的主通信通道。
+- `http_addr`：引擎内置 HTTP/JSON 调试接口的监听地址，仅当 `app_http_debug` 为 `true` 时启动。
+- `app_http_debug`：是否启动 HTTP 调试接口。`false`（默认）时仅监听 gRPC，减少端口暴露；`true` 时同时监听 gRPC 与 HTTP，便于本地调试。详见 [rsmgo http 服务调试](#rsmgo-http服务调试)。
 - `data_dir`：SQLite 数据库与相关持久化文件存放路径，支持相对路径（如 `./share/rsmgo`）以及 `~` 主目录展开（如 `~/.local/share/rsmgo`）。
 - `system_prompt`：覆盖默认系统提示词。
 
 ### `providers`
 
-配置可用的 LLM 提供商列表。`anthropic` 使用原生 Anthropic API，其余名称默认按 OpenAI 兼容协议处理。
+配置可用的 LLM 提供商列表。`anthropic` 使用原生 Anthropic API，其余名称默认按 OpenAI 兼容协议处理。`base_url` 请以 `/v1` 结尾，模型 `id` 需与目标服务商实际提供的模型名称保持一致，否则会遇到 404 错误。
 
 ```yaml
 providers:
@@ -386,11 +397,21 @@ providers:
     models:
       - id: "gpt-4o"
         display_name: "GPT-4o"
+
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "moonshot-v1-8k"
+    models:
+      - id: "moonshot-v1-8k"
+        display_name: "Moonshot V1 8K"
+      - id: "moonshot-v1-8k-vision-preview"
+        display_name: "Moonshot V1 8K Vision"
 ```
 
 ### `tools`
 
-声明默认启用的工具白名单。
+声明控制面 `/api/v1/tools` 返回的工具白名单，以及引擎默认注册的工具集合。实际聊天时，工具默认不启用，需要在前端工具菜单中手动勾选才会传递给模型。
 
 ```yaml
 tools:
@@ -400,6 +421,8 @@ tools:
     - execute_command
     - list_directory
     - search
+    - web_search
+    - fetch_url
 ```
 
 ### `control_plane`
@@ -420,6 +443,156 @@ control_plane:
 
 ---
 
+## 工具使用
+
+### 启用方式
+
+工具需要两步启用：
+
+1. **服务端白名单**：在 `app.yaml` 的 `tools.enabled` 中列出要注册的工具，未列出的工具不会出现在前端。
+2. **前端勾选**：聊天界面工具菜单（🛠）中手动勾选本次对话要使用的工具。默认不勾选任何工具，避免普通聊天问题被强制触发工具调用。
+
+### 内置工具列表
+
+| 工具名 | 说明 | 参数 |
+|--------|------|------|
+| `read_file` | 读取指定文件内容。 | `path`: 文件绝对或相对路径 |
+| `write_file` | 写入内容到文件，自动创建父目录。 | `path`: 文件路径；`content`: 文件内容 |
+| `execute_command` | 执行 shell 命令并返回 stdout/stderr。 | `command`: 命令；`working_dir`（可选）: 工作目录 |
+| `list_directory` | 列出目录下的文件与子目录。 | `path`: 目录路径 |
+| `search` | 使用 `find` 按文件名模式递归搜索。 | `directory`: 搜索目录；`pattern`: 文件名模式，如 `*.rs` |
+| `web_search` | 联网搜索。 | `query`: 搜索关键词 |
+| `fetch_url` | 抓取指定网页并返回文本内容。 | `url`: 目标网页地址 |
+
+### 使用示例
+
+在 `app.yaml` 中启用工具：
+
+```yaml
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - execute_command
+    - list_directory
+    - search
+    - web_search
+    - fetch_url
+```
+
+重启引擎后，前端工具菜单会显示这些工具。勾选 `list_directory` 后发送“列出当前目录”，模型可能会调用：
+
+```json
+{
+  "name": "list_directory",
+  "arguments": { "path": "." }
+}
+```
+
+工具执行结果会回传给模型，模型再生成最终的自然语言回答。
+
+### 安全提示
+
+- `execute_command` 与 `write_file` 会实际执行命令或写入文件，请谨慎勾选。
+- 建议仅对可信模型和明确需要文件操作的会话启用写入/执行类工具。
+- 工具运行在本地环境，权限与启动 rsmgo 的用户一致。
+
+---
+
+## 常见问题与注意事项
+
+### 1. Kimi / Moonshot 返回 404 `resource_not_found_error`
+
+通常是 `base_url` 或模型 `id` 写错了。Moonshot 官方 API 的 `base_url` 应为：
+
+```yaml
+base_url: "https://api.moonshot.cn/v1"
+```
+
+有效模型示例：`moonshot-v1-8k`、`moonshot-v1-32k`、`moonshot-v1-128k`、`moonshot-v1-8k-vision-preview`。若使用第三方转发或内部 endpoint，请确保该地址真实存在且模型 ID 与服务商一致。
+
+### 2. 图片上传后模型“看不懂”
+
+只有 vision 模型才能把图片作为多模态内容处理。非 vision 模型（如 `deepseek-chat`）只能看到文件名文本。如需图片理解，请在 `app.yaml` 中启用 vision 模型，例如：
+
+```yaml
+providers:
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "moonshot-v1-8k-vision-preview"
+    models:
+      - id: "moonshot-v1-8k-vision-preview"
+        display_name: "Moonshot V1 8K Vision"
+```
+
+或启用 OpenAI `gpt-4o`、Gemini `gemini-2.5-flash`、Qwen `qwen-vl-max` 等 vision 模型。
+
+### 3. 普通聊天问题也触发工具调用
+
+工具默认不会自动启用。聊天界面工具菜单（🛠）里未勾选任何工具时，模型不会收到工具定义。若勾选了工具，模型认为有必要时才会调用。
+
+---
+
+## rsmgo http 服务调试
+
+引擎除了 gRPC（默认 `127.0.0.1:50051`）之外，还内置了一个轻量的 HTTP/JSON 调试接口（默认 `127.0.0.1:8080`）。它直接绑定到引擎内部同一个 `Agent`，与 gRPC 走的是同一套业务逻辑，仅传输层不同。
+
+> 该 HTTP 服务是**调试/辅助用途**。主业务流程（Web/桌面 → Go 控制面 `:9090` → gRPC `:50051` → 引擎）并不经过它，因此即使关掉也不影响任何主流程，仅方便 `curl` 调试与健康检查。
+
+### 开关控制
+
+通过 `app.yaml` 的 `engine.app_http_debug` 控制是否启动该 HTTP 服务：
+
+```yaml
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  app_http_debug: true   # true：启动 HTTP 调试接口；false：只跑 gRPC
+```
+
+- `app_http_debug: false`（默认）：不启动 HTTP 服务，引擎仅监听 gRPC，减少端口暴露。
+- `app_http_debug: true`：gRPC 与 HTTP 双监听，便于本地 `curl` 调试与健康检查。
+
+### 路由
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/health` | 健康检查，返回 `status` 与 `version` |
+| `POST` | `/api/v1/chat` | 直接以 JSON `ChatRequest` 调用 `Agent::chat`（不经 gRPC） |
+| `GET` | `/api/v1/tools` | 列出已注册工具及其定义 |
+| `GET` | `/api/v1/providers` | 列出已配置的 provider 名称 |
+
+### 示例
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+直接对话（请求体与 `types::ChatRequest` 一致）：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "debug-1",
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+列出工具与提供商：
+
+```bash
+curl http://127.0.0.1:8080/api/v1/tools
+curl http://127.0.0.1:8080/api/v1/providers
+```
+
+---
+
 ## 组件说明
 
 ### rsmgo-core（Rust 引擎）
@@ -436,13 +609,7 @@ control_plane:
 
 ### 内置工具
 
-| 工具名 | 说明 |
-|--------|------|
-| `read_file` | 读取指定文件内容。 |
-| `write_file` | 写入内容到文件，自动创建父目录。 |
-| `execute_command` | 执行 shell 命令并返回输出。 |
-| `list_directory` | 列出目录下的文件与子目录。 |
-| `search` | 使用 `find` 按文件名模式递归搜索。 |
+完整工具列表、参数说明与安全提示见 [工具使用](#工具使用) 章节。工具实现位于 `crates/rsmgo-core/src/tools/`。
 
 ### control（Go 控制面）
 
@@ -465,7 +632,7 @@ control_plane:
 | 文件/目录 | 说明 |
 |-----------|------|
 | `app/page.tsx` | 主页面，会话侧边栏与当前聊天区。 |
-| `components/Chat.tsx` | 消息列表、输入框与发送逻辑。 |
+| `components/Chat.tsx` | 消息列表、输入框、附件上传与发送逻辑。工具默认不启用，需通过工具菜单手动勾选。 |
 | `lib/api.ts` | 对控制面 `/api/v1/*` 接口的封装。 |
 | `next.config.js` | standalone 输出与 API 反向代理配置。 |
 

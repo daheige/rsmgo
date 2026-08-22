@@ -115,6 +115,7 @@ type Message struct {
 	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
 	ToolCallId    string                 `protobuf:"bytes,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"` // optional, for tool role
 	ToolCalls     []*ToolCall            `protobuf:"bytes,4,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`      // optional, for assistant role with tool calls
+	Parts         []*MultiModalPart      `protobuf:"bytes,5,rep,name=parts,proto3" json:"parts,omitempty"`                               // optional, for multimodal (vision/file) content
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -177,6 +178,65 @@ func (x *Message) GetToolCalls() []*ToolCall {
 	return nil
 }
 
+func (x *Message) GetParts() []*MultiModalPart {
+	if x != nil {
+		return x.Parts
+	}
+	return nil
+}
+
+type MultiModalPart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ContentType   string                 `protobuf:"bytes,1,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"` // e.g. image/png, image/jpeg
+	Data          string                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                  // base64-encoded bytes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MultiModalPart) Reset() {
+	*x = MultiModalPart{}
+	mi := &file_rsmgo_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MultiModalPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MultiModalPart) ProtoMessage() {}
+
+func (x *MultiModalPart) ProtoReflect() protoreflect.Message {
+	mi := &file_rsmgo_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MultiModalPart.ProtoReflect.Descriptor instead.
+func (*MultiModalPart) Descriptor() ([]byte, []int) {
+	return file_rsmgo_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *MultiModalPart) GetContentType() string {
+	if x != nil {
+		return x.ContentType
+	}
+	return ""
+}
+
+func (x *MultiModalPart) GetData() string {
+	if x != nil {
+		return x.Data
+	}
+	return ""
+}
+
 type ToolCall struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -188,7 +248,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_rsmgo_proto_msgTypes[3]
+	mi := &file_rsmgo_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -200,7 +260,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[3]
+	mi := &file_rsmgo_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -213,7 +273,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{3}
+	return file_rsmgo_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ToolCall) GetId() string {
@@ -251,7 +311,7 @@ type ChatRequest struct {
 
 func (x *ChatRequest) Reset() {
 	*x = ChatRequest{}
-	mi := &file_rsmgo_proto_msgTypes[4]
+	mi := &file_rsmgo_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -263,7 +323,7 @@ func (x *ChatRequest) String() string {
 func (*ChatRequest) ProtoMessage() {}
 
 func (x *ChatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[4]
+	mi := &file_rsmgo_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -276,7 +336,7 @@ func (x *ChatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatRequest.ProtoReflect.Descriptor instead.
 func (*ChatRequest) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{4}
+	return file_rsmgo_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ChatRequest) GetSessionId() string {
@@ -333,7 +393,7 @@ type ChatResponse struct {
 
 func (x *ChatResponse) Reset() {
 	*x = ChatResponse{}
-	mi := &file_rsmgo_proto_msgTypes[5]
+	mi := &file_rsmgo_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -345,7 +405,7 @@ func (x *ChatResponse) String() string {
 func (*ChatResponse) ProtoMessage() {}
 
 func (x *ChatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[5]
+	mi := &file_rsmgo_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -358,7 +418,7 @@ func (x *ChatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatResponse.ProtoReflect.Descriptor instead.
 func (*ChatResponse) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{5}
+	return file_rsmgo_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ChatResponse) GetSessionId() string {
@@ -402,7 +462,7 @@ type ChatStreamChunk struct {
 
 func (x *ChatStreamChunk) Reset() {
 	*x = ChatStreamChunk{}
-	mi := &file_rsmgo_proto_msgTypes[6]
+	mi := &file_rsmgo_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -414,7 +474,7 @@ func (x *ChatStreamChunk) String() string {
 func (*ChatStreamChunk) ProtoMessage() {}
 
 func (x *ChatStreamChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[6]
+	mi := &file_rsmgo_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,7 +487,7 @@ func (x *ChatStreamChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatStreamChunk.ProtoReflect.Descriptor instead.
 func (*ChatStreamChunk) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{6}
+	return file_rsmgo_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ChatStreamChunk) GetSessionId() string {
@@ -476,7 +536,7 @@ type Usage struct {
 
 func (x *Usage) Reset() {
 	*x = Usage{}
-	mi := &file_rsmgo_proto_msgTypes[7]
+	mi := &file_rsmgo_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -488,7 +548,7 @@ func (x *Usage) String() string {
 func (*Usage) ProtoMessage() {}
 
 func (x *Usage) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[7]
+	mi := &file_rsmgo_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -501,7 +561,7 @@ func (x *Usage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Usage.ProtoReflect.Descriptor instead.
 func (*Usage) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{7}
+	return file_rsmgo_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Usage) GetPromptTokens() uint32 {
@@ -534,7 +594,7 @@ type ListModelsRequest struct {
 
 func (x *ListModelsRequest) Reset() {
 	*x = ListModelsRequest{}
-	mi := &file_rsmgo_proto_msgTypes[8]
+	mi := &file_rsmgo_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -546,7 +606,7 @@ func (x *ListModelsRequest) String() string {
 func (*ListModelsRequest) ProtoMessage() {}
 
 func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[8]
+	mi := &file_rsmgo_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -559,7 +619,7 @@ func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsRequest.ProtoReflect.Descriptor instead.
 func (*ListModelsRequest) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{8}
+	return file_rsmgo_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListModelsRequest) GetProvider() string {
@@ -580,7 +640,7 @@ type ModelInfo struct {
 
 func (x *ModelInfo) Reset() {
 	*x = ModelInfo{}
-	mi := &file_rsmgo_proto_msgTypes[9]
+	mi := &file_rsmgo_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -592,7 +652,7 @@ func (x *ModelInfo) String() string {
 func (*ModelInfo) ProtoMessage() {}
 
 func (x *ModelInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[9]
+	mi := &file_rsmgo_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -605,7 +665,7 @@ func (x *ModelInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelInfo.ProtoReflect.Descriptor instead.
 func (*ModelInfo) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{9}
+	return file_rsmgo_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ModelInfo) GetId() string {
@@ -638,7 +698,7 @@ type ListModelsResponse struct {
 
 func (x *ListModelsResponse) Reset() {
 	*x = ListModelsResponse{}
-	mi := &file_rsmgo_proto_msgTypes[10]
+	mi := &file_rsmgo_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +710,7 @@ func (x *ListModelsResponse) String() string {
 func (*ListModelsResponse) ProtoMessage() {}
 
 func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[10]
+	mi := &file_rsmgo_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +723,7 @@ func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsResponse.ProtoReflect.Descriptor instead.
 func (*ListModelsResponse) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{10}
+	return file_rsmgo_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListModelsResponse) GetModels() []*ModelInfo {
@@ -683,7 +743,7 @@ type ExecuteToolRequest struct {
 
 func (x *ExecuteToolRequest) Reset() {
 	*x = ExecuteToolRequest{}
-	mi := &file_rsmgo_proto_msgTypes[11]
+	mi := &file_rsmgo_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -695,7 +755,7 @@ func (x *ExecuteToolRequest) String() string {
 func (*ExecuteToolRequest) ProtoMessage() {}
 
 func (x *ExecuteToolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[11]
+	mi := &file_rsmgo_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -708,7 +768,7 @@ func (x *ExecuteToolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteToolRequest.ProtoReflect.Descriptor instead.
 func (*ExecuteToolRequest) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{11}
+	return file_rsmgo_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ExecuteToolRequest) GetName() string {
@@ -736,7 +796,7 @@ type ExecuteToolResponse struct {
 
 func (x *ExecuteToolResponse) Reset() {
 	*x = ExecuteToolResponse{}
-	mi := &file_rsmgo_proto_msgTypes[12]
+	mi := &file_rsmgo_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -748,7 +808,7 @@ func (x *ExecuteToolResponse) String() string {
 func (*ExecuteToolResponse) ProtoMessage() {}
 
 func (x *ExecuteToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[12]
+	mi := &file_rsmgo_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -761,7 +821,7 @@ func (x *ExecuteToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteToolResponse.ProtoReflect.Descriptor instead.
 func (*ExecuteToolResponse) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{12}
+	return file_rsmgo_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ExecuteToolResponse) GetSuccess() bool {
@@ -796,7 +856,7 @@ type ToolInfo struct {
 
 func (x *ToolInfo) Reset() {
 	*x = ToolInfo{}
-	mi := &file_rsmgo_proto_msgTypes[13]
+	mi := &file_rsmgo_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -808,7 +868,7 @@ func (x *ToolInfo) String() string {
 func (*ToolInfo) ProtoMessage() {}
 
 func (x *ToolInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[13]
+	mi := &file_rsmgo_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -821,7 +881,7 @@ func (x *ToolInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolInfo.ProtoReflect.Descriptor instead.
 func (*ToolInfo) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{13}
+	return file_rsmgo_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ToolInfo) GetName() string {
@@ -853,7 +913,7 @@ type ListToolsRequest struct {
 
 func (x *ListToolsRequest) Reset() {
 	*x = ListToolsRequest{}
-	mi := &file_rsmgo_proto_msgTypes[14]
+	mi := &file_rsmgo_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -865,7 +925,7 @@ func (x *ListToolsRequest) String() string {
 func (*ListToolsRequest) ProtoMessage() {}
 
 func (x *ListToolsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[14]
+	mi := &file_rsmgo_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -878,7 +938,7 @@ func (x *ListToolsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListToolsRequest.ProtoReflect.Descriptor instead.
 func (*ListToolsRequest) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{14}
+	return file_rsmgo_proto_rawDescGZIP(), []int{15}
 }
 
 type ListToolsResponse struct {
@@ -890,7 +950,7 @@ type ListToolsResponse struct {
 
 func (x *ListToolsResponse) Reset() {
 	*x = ListToolsResponse{}
-	mi := &file_rsmgo_proto_msgTypes[15]
+	mi := &file_rsmgo_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -902,7 +962,7 @@ func (x *ListToolsResponse) String() string {
 func (*ListToolsResponse) ProtoMessage() {}
 
 func (x *ListToolsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rsmgo_proto_msgTypes[15]
+	mi := &file_rsmgo_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -915,7 +975,7 @@ func (x *ListToolsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListToolsResponse.ProtoReflect.Descriptor instead.
 func (*ListToolsResponse) Descriptor() ([]byte, []int) {
-	return file_rsmgo_proto_rawDescGZIP(), []int{15}
+	return file_rsmgo_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListToolsResponse) GetTools() []*ToolInfo {
@@ -933,14 +993,18 @@ const file_rsmgo_proto_rawDesc = "" +
 	"\rHealthRequest\"B\n" +
 	"\x0eHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\tR\aversion\"\x8c\x01\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\"\xbc\x01\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12 \n" +
 	"\ftool_call_id\x18\x03 \x01(\tR\n" +
 	"toolCallId\x121\n" +
 	"\n" +
-	"tool_calls\x18\x04 \x03(\v2\x12.rsmgo.v1.ToolCallR\ttoolCalls\"L\n" +
+	"tool_calls\x18\x04 \x03(\v2\x12.rsmgo.v1.ToolCallR\ttoolCalls\x12.\n" +
+	"\x05parts\x18\x05 \x03(\v2\x18.rsmgo.v1.MultiModalPartR\x05parts\"G\n" +
+	"\x0eMultiModalPart\x12!\n" +
+	"\fcontent_type\x18\x01 \x01(\tR\vcontentType\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\tR\x04data\"L\n" +
 	"\bToolCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
@@ -1017,52 +1081,54 @@ func file_rsmgo_proto_rawDescGZIP() []byte {
 	return file_rsmgo_proto_rawDescData
 }
 
-var file_rsmgo_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_rsmgo_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_rsmgo_proto_goTypes = []any{
 	(*HealthRequest)(nil),       // 0: rsmgo.v1.HealthRequest
 	(*HealthResponse)(nil),      // 1: rsmgo.v1.HealthResponse
 	(*Message)(nil),             // 2: rsmgo.v1.Message
-	(*ToolCall)(nil),            // 3: rsmgo.v1.ToolCall
-	(*ChatRequest)(nil),         // 4: rsmgo.v1.ChatRequest
-	(*ChatResponse)(nil),        // 5: rsmgo.v1.ChatResponse
-	(*ChatStreamChunk)(nil),     // 6: rsmgo.v1.ChatStreamChunk
-	(*Usage)(nil),               // 7: rsmgo.v1.Usage
-	(*ListModelsRequest)(nil),   // 8: rsmgo.v1.ListModelsRequest
-	(*ModelInfo)(nil),           // 9: rsmgo.v1.ModelInfo
-	(*ListModelsResponse)(nil),  // 10: rsmgo.v1.ListModelsResponse
-	(*ExecuteToolRequest)(nil),  // 11: rsmgo.v1.ExecuteToolRequest
-	(*ExecuteToolResponse)(nil), // 12: rsmgo.v1.ExecuteToolResponse
-	(*ToolInfo)(nil),            // 13: rsmgo.v1.ToolInfo
-	(*ListToolsRequest)(nil),    // 14: rsmgo.v1.ListToolsRequest
-	(*ListToolsResponse)(nil),   // 15: rsmgo.v1.ListToolsResponse
+	(*MultiModalPart)(nil),      // 3: rsmgo.v1.MultiModalPart
+	(*ToolCall)(nil),            // 4: rsmgo.v1.ToolCall
+	(*ChatRequest)(nil),         // 5: rsmgo.v1.ChatRequest
+	(*ChatResponse)(nil),        // 6: rsmgo.v1.ChatResponse
+	(*ChatStreamChunk)(nil),     // 7: rsmgo.v1.ChatStreamChunk
+	(*Usage)(nil),               // 8: rsmgo.v1.Usage
+	(*ListModelsRequest)(nil),   // 9: rsmgo.v1.ListModelsRequest
+	(*ModelInfo)(nil),           // 10: rsmgo.v1.ModelInfo
+	(*ListModelsResponse)(nil),  // 11: rsmgo.v1.ListModelsResponse
+	(*ExecuteToolRequest)(nil),  // 12: rsmgo.v1.ExecuteToolRequest
+	(*ExecuteToolResponse)(nil), // 13: rsmgo.v1.ExecuteToolResponse
+	(*ToolInfo)(nil),            // 14: rsmgo.v1.ToolInfo
+	(*ListToolsRequest)(nil),    // 15: rsmgo.v1.ListToolsRequest
+	(*ListToolsResponse)(nil),   // 16: rsmgo.v1.ListToolsResponse
 }
 var file_rsmgo_proto_depIdxs = []int32{
-	3,  // 0: rsmgo.v1.Message.tool_calls:type_name -> rsmgo.v1.ToolCall
-	2,  // 1: rsmgo.v1.ChatRequest.messages:type_name -> rsmgo.v1.Message
-	2,  // 2: rsmgo.v1.ChatResponse.message:type_name -> rsmgo.v1.Message
-	3,  // 3: rsmgo.v1.ChatResponse.tool_calls:type_name -> rsmgo.v1.ToolCall
-	7,  // 4: rsmgo.v1.ChatResponse.usage:type_name -> rsmgo.v1.Usage
-	2,  // 5: rsmgo.v1.ChatStreamChunk.message:type_name -> rsmgo.v1.Message
-	3,  // 6: rsmgo.v1.ChatStreamChunk.tool_calls:type_name -> rsmgo.v1.ToolCall
-	9,  // 7: rsmgo.v1.ListModelsResponse.models:type_name -> rsmgo.v1.ModelInfo
-	13, // 8: rsmgo.v1.ListToolsResponse.tools:type_name -> rsmgo.v1.ToolInfo
-	0,  // 9: rsmgo.v1.Engine.Health:input_type -> rsmgo.v1.HealthRequest
-	4,  // 10: rsmgo.v1.Engine.Chat:input_type -> rsmgo.v1.ChatRequest
-	4,  // 11: rsmgo.v1.Engine.ChatStream:input_type -> rsmgo.v1.ChatRequest
-	8,  // 12: rsmgo.v1.Engine.ListModels:input_type -> rsmgo.v1.ListModelsRequest
-	11, // 13: rsmgo.v1.Engine.ExecuteTool:input_type -> rsmgo.v1.ExecuteToolRequest
-	14, // 14: rsmgo.v1.Engine.ListTools:input_type -> rsmgo.v1.ListToolsRequest
-	1,  // 15: rsmgo.v1.Engine.Health:output_type -> rsmgo.v1.HealthResponse
-	5,  // 16: rsmgo.v1.Engine.Chat:output_type -> rsmgo.v1.ChatResponse
-	6,  // 17: rsmgo.v1.Engine.ChatStream:output_type -> rsmgo.v1.ChatStreamChunk
-	10, // 18: rsmgo.v1.Engine.ListModels:output_type -> rsmgo.v1.ListModelsResponse
-	12, // 19: rsmgo.v1.Engine.ExecuteTool:output_type -> rsmgo.v1.ExecuteToolResponse
-	15, // 20: rsmgo.v1.Engine.ListTools:output_type -> rsmgo.v1.ListToolsResponse
-	15, // [15:21] is the sub-list for method output_type
-	9,  // [9:15] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	4,  // 0: rsmgo.v1.Message.tool_calls:type_name -> rsmgo.v1.ToolCall
+	3,  // 1: rsmgo.v1.Message.parts:type_name -> rsmgo.v1.MultiModalPart
+	2,  // 2: rsmgo.v1.ChatRequest.messages:type_name -> rsmgo.v1.Message
+	2,  // 3: rsmgo.v1.ChatResponse.message:type_name -> rsmgo.v1.Message
+	4,  // 4: rsmgo.v1.ChatResponse.tool_calls:type_name -> rsmgo.v1.ToolCall
+	8,  // 5: rsmgo.v1.ChatResponse.usage:type_name -> rsmgo.v1.Usage
+	2,  // 6: rsmgo.v1.ChatStreamChunk.message:type_name -> rsmgo.v1.Message
+	4,  // 7: rsmgo.v1.ChatStreamChunk.tool_calls:type_name -> rsmgo.v1.ToolCall
+	10, // 8: rsmgo.v1.ListModelsResponse.models:type_name -> rsmgo.v1.ModelInfo
+	14, // 9: rsmgo.v1.ListToolsResponse.tools:type_name -> rsmgo.v1.ToolInfo
+	0,  // 10: rsmgo.v1.Engine.Health:input_type -> rsmgo.v1.HealthRequest
+	5,  // 11: rsmgo.v1.Engine.Chat:input_type -> rsmgo.v1.ChatRequest
+	5,  // 12: rsmgo.v1.Engine.ChatStream:input_type -> rsmgo.v1.ChatRequest
+	9,  // 13: rsmgo.v1.Engine.ListModels:input_type -> rsmgo.v1.ListModelsRequest
+	12, // 14: rsmgo.v1.Engine.ExecuteTool:input_type -> rsmgo.v1.ExecuteToolRequest
+	15, // 15: rsmgo.v1.Engine.ListTools:input_type -> rsmgo.v1.ListToolsRequest
+	1,  // 16: rsmgo.v1.Engine.Health:output_type -> rsmgo.v1.HealthResponse
+	6,  // 17: rsmgo.v1.Engine.Chat:output_type -> rsmgo.v1.ChatResponse
+	7,  // 18: rsmgo.v1.Engine.ChatStream:output_type -> rsmgo.v1.ChatStreamChunk
+	11, // 19: rsmgo.v1.Engine.ListModels:output_type -> rsmgo.v1.ListModelsResponse
+	13, // 20: rsmgo.v1.Engine.ExecuteTool:output_type -> rsmgo.v1.ExecuteToolResponse
+	16, // 21: rsmgo.v1.Engine.ListTools:output_type -> rsmgo.v1.ListToolsResponse
+	16, // [16:22] is the sub-list for method output_type
+	10, // [10:16] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_rsmgo_proto_init() }
@@ -1076,7 +1142,7 @@ func file_rsmgo_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rsmgo_proto_rawDesc), len(file_rsmgo_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -1,5 +1,7 @@
 use crate::agent::Agent;
-use crate::types::{ChatRequest, ChatResponse, Message, ToolCall, ToolDefinition, Usage};
+use crate::types::{
+    ChatRequest, ChatResponse, Message, MultiModalPart, ToolCall, ToolDefinition, Usage,
+};
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -19,7 +21,8 @@ use proto::{
     ChatRequest as ProtoChatRequest, ChatResponse as ProtoChatResponse, ChatStreamChunk,
     ExecuteToolRequest, ExecuteToolResponse, HealthRequest, HealthResponse, ListModelsRequest,
     ListModelsResponse, ListToolsRequest, ListToolsResponse, Message as ProtoMessage,
-    ModelInfo as ProtoModelInfo, ToolCall as ProtoToolCall, ToolInfo, Usage as ProtoUsage,
+    ModelInfo as ProtoModelInfo, MultiModalPart as ProtoMultiModalPart, ToolCall as ProtoToolCall,
+    ToolInfo, Usage as ProtoUsage,
 };
 
 #[derive(Clone)]
@@ -43,6 +46,7 @@ fn map_message(m: &Message) -> ProtoMessage {
             .as_ref()
             .map(|tcs| tcs.iter().map(map_tool_call).collect())
             .unwrap_or_default(),
+        parts: m.parts.iter().map(map_part).collect(),
     }
 }
 
@@ -70,6 +74,21 @@ fn map_proto_message(m: &ProtoMessage) -> Message {
                     .collect(),
             )
         },
+        parts: m.parts.iter().map(map_proto_part).collect(),
+    }
+}
+
+fn map_part(img: &MultiModalPart) -> ProtoMultiModalPart {
+    ProtoMultiModalPart {
+        content_type: img.content_type.clone(),
+        data: img.data.clone(),
+    }
+}
+
+fn map_proto_part(img: &ProtoMultiModalPart) -> MultiModalPart {
+    MultiModalPart {
+        content_type: img.content_type.clone(),
+        data: img.data.clone(),
     }
 }
 
@@ -267,18 +286,25 @@ pub async fn run_server(
     agent: Arc<Agent>,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
+    app_http_debug: bool,
 ) -> crate::error::Result<()> {
     let service = EngineService::new(agent.clone());
     let grpc = tonic::transport::Server::builder()
         .add_service(EngineServer::new(service))
         .serve(grpc_addr);
 
+    tracing::info!("gRPC listening on {}", grpc_addr);
+
+    // The HTTP/JSON API is a debug convenience only; the main data path is
+    // gRPC. When disabled, run the gRPC server alone.
+    if !app_http_debug {
+        return grpc.await.map_err(|e| e.into());
+    }
+
     let app = http_router(agent);
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     let http = axum::serve(listener, app);
-
-    tracing::info!("gRPC listening on {}", grpc_addr);
-    tracing::info!("HTTP listening on {}", http_addr);
+    tracing::info!("HTTP debug API listening on {}", http_addr);
 
     tokio::select! {
         result = grpc => result.map_err(|e| e.into()),

@@ -31,8 +31,10 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   }, [sessionId]);
 
   useEffect(() => {
-    if (toolsInitialized.current || tools.length === 0) return;
-    setEnabledTools(tools.filter((t) => t.name !== WEB_SEARCH_TOOL).map((t) => t.name));
+    if (toolsInitialized.current) return;
+    // No tools are enabled by default. The user must explicitly select them
+    // via the tools menu to avoid ordinary questions triggering tool calls.
+    setEnabledTools([]);
     toolsInitialized.current = true;
   }, [tools]);
 

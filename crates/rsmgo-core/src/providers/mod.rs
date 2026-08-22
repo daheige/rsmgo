@@ -59,6 +59,7 @@ pub fn default_registry() -> ProviderRegistry {
     registry.register(Arc::new(OpenAiCompatibleProvider::default_deepseek()));
     registry.register(Arc::new(OpenAiCompatibleProvider::default_qwen()));
     registry.register(Arc::new(OpenAiCompatibleProvider::default_kimi()));
+    registry.register(Arc::new(OpenAiCompatibleProvider::default_gemini()));
     registry.register(Arc::new(AnthropicProvider::default()));
     registry
 }

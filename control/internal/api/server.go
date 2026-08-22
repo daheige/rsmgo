@@ -1,8 +1,12 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"os"
@@ -17,7 +21,13 @@ import (
 	pb "github.com/daheige/rsmgo/pb"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ledongthuc/pdf"
 )
+
+// maxImageBytes caps the size of an image attachment that is sent to the model
+// as base64 multimodal content. Larger images are skipped to avoid oversized
+// requests (the model still sees an "[Image attached: name]" note).
+const maxImageBytes = 10 * 1024 * 1024
 
 type Server struct {
 	engine          *engine.Client
@@ -248,6 +258,7 @@ func (s *Server) chat(c *gin.Context) {
 	}
 
 	content := s.withAttachments(req.Content, req.AttachmentIDs)
+	imageParts := s.imageParts(req.AttachmentIDs)
 
 	sess.Messages = append(sess.Messages, session.Message{
 		Role:    "user",
@@ -256,8 +267,12 @@ func (s *Server) chat(c *gin.Context) {
 	})
 
 	pbMessages := make([]*pb.Message, 0, len(sess.Messages))
-	for _, m := range sess.Messages {
-		pbMessages = append(pbMessages, &pb.Message{Role: m.Role, Content: m.Content})
+	for i, m := range sess.Messages {
+		pm := &pb.Message{Role: m.Role, Content: m.Content}
+		if i == len(sess.Messages)-1 && len(imageParts) > 0 {
+			pm.Parts = imageParts
+		}
+		pbMessages = append(pbMessages, pm)
 	}
 
 	toolNames := append([]string{}, req.ToolNames...)
@@ -322,10 +337,14 @@ func (s *Server) uploadFile(c *gin.Context) {
 		return
 	}
 
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
 	meta := attachmentMeta{
 		Name:        header.Filename,
-		ContentType: header.Header.Get("Content-Type"),
-		Size:        header.Size,
+		ContentType: contentType,
+		Size:        int64(len(data)),
 	}
 	metaBytes, _ := json.Marshal(meta)
 
@@ -378,7 +397,9 @@ func (s *Server) loadAttachment(id string) (attachmentMeta, []byte, error) {
 
 // withAttachments appends a readable representation of each attachment to the
 // user's message so the model can see it. Text-like files are inlined (up to a
-// cap); binary files are described by name and size.
+// cap); documents (PDF/DOCX) have their text extracted; binary files are
+// described by name and size; images are referenced by name (their pixels are
+// sent separately as multimodal image parts).
 func (s *Server) withAttachments(content string, ids []string) string {
 	if len(ids) == 0 {
 		return content
@@ -390,21 +411,26 @@ func (s *Server) withAttachments(content string, ids []string) string {
 		if err != nil {
 			continue
 		}
+		if isImageContent(meta.ContentType) {
+			b.WriteString("\n\n[Image attached: ")
+			b.WriteString(meta.Name)
+			b.WriteString("]")
+			continue
+		}
 		b.WriteString("\n\n[Attached file: ")
 		b.WriteString(meta.Name)
 		b.WriteString("]")
-		if isTextContent(meta.ContentType) || looksText(data) {
-			const capBytes = 8000
-			text := string(data)
-			if len(text) > capBytes {
-				cut := capBytes
-				for cut > 0 && !utf8.RuneStart(text[cut]) {
-					cut--
-				}
-				text = text[:cut] + "\n...(truncated)"
-			}
+		var text string
+		var found bool
+		switch {
+		case isTextContent(meta.ContentType) || looksText(data):
+			text, found = string(data), true
+		default:
+			text, found = extractDocumentText(data)
+		}
+		if found {
 			b.WriteString("\n```\n")
-			b.WriteString(text)
+			b.WriteString(truncateText(text, 8000))
 			b.WriteString("\n```")
 		} else {
 			b.WriteString(" (binary file, ")
@@ -413,6 +439,132 @@ func (s *Server) withAttachments(content string, ids []string) string {
 		}
 	}
 	return b.String()
+}
+
+// truncateText limits text to capBytes without splitting a UTF-8 rune.
+func truncateText(text string, capBytes int) string {
+	if len(text) <= capBytes {
+		return text
+	}
+	cut := capBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "\n...(truncated)"
+}
+
+// extractDocumentText pulls readable text out of common document formats
+// (PDF, DOCX). Returns the extracted text and true on success.
+func extractDocumentText(data []byte) (string, bool) {
+	if len(data) >= 5 && string(data[:5]) == "%PDF-" {
+		return extractPdfText(data)
+	}
+	// DOCX (and other OOXML files) are ZIP archives starting with "PK".
+	if len(data) >= 4 && string(data[:4]) == "PK\x03\x04" {
+		return extractDocxText(data)
+	}
+	return "", false
+}
+
+func extractPdfText(data []byte) (string, bool) {
+	r, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", false
+	}
+	textReader, err := r.GetPlainText()
+	if err != nil {
+		return "", false
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(textReader); err != nil {
+		return "", false
+	}
+	text := strings.TrimSpace(buf.String())
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+func extractDocxText(data []byte) (string, bool) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", false
+	}
+	var docXML []byte
+	for _, f := range zr.File {
+		if f.Name != "word/document.xml" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", false
+		}
+		docXML, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return "", false
+		}
+		break
+	}
+	if docXML == nil {
+		return "", false
+	}
+	text := strings.TrimSpace(docxXMLToText(string(docXML)))
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+func docxXMLToText(x string) string {
+	x = strings.ReplaceAll(x, "</w:p>", "\n")
+	x = strings.ReplaceAll(x, "<w:tab/>", "\t")
+	x = strings.ReplaceAll(x, "<w:br/>", "\n")
+	var b strings.Builder
+	inTag := false
+	for _, r := range x {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return html.UnescapeString(b.String())
+}
+
+// imageParts returns base64-encoded image parts for the given attachment IDs,
+// so vision-capable models can actually see the uploaded images. Non-image
+// attachments and images over maxImageBytes are skipped.
+func (s *Server) imageParts(ids []string) []*pb.MultiModalPart {
+	var parts []*pb.MultiModalPart
+	for _, id := range ids {
+		meta, data, err := s.loadAttachment(id)
+		if err != nil {
+			continue
+		}
+		if !isImageContent(meta.ContentType) || len(data) > maxImageBytes {
+			continue
+		}
+		contentType := meta.ContentType
+		if contentType == "" {
+			contentType = http.DetectContentType(data)
+		}
+		parts = append(parts, &pb.MultiModalPart{
+			ContentType: contentType,
+			Data:        base64.StdEncoding.EncodeToString(data),
+		})
+	}
+	return parts
+}
+
+func isImageContent(contentType string) bool {
+	return strings.HasPrefix(contentType, "image/")
 }
 
 func isTextContent(contentType string) bool {

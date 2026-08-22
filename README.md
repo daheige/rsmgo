@@ -16,6 +16,8 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - [Directory Structure](#directory-structure)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
+- [Tool Usage](#tool-usage)
+- [Troubleshooting & Notes](#troubleshooting--notes)
 - [Component Reference](#component-reference)
 - [Future Evolution](#future-evolution)
 - [License](#license)
@@ -27,7 +29,9 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - **Model-agnostic**: Unified LLM provider abstraction. Supports OpenAI, Anthropic, DeepSeek, Qwen, Kimi, and any other OpenAI-compatible endpoint. Adding a new provider only requires a `base_url` and a model list.
 - **Agent runtime**: Built-in ReAct-style loop. The model can decide to invoke tools, and tool results are automatically fed back for follow-up reasoning.
 - **Memory persistence**: Session and message history are stored in SQLite for long-term, cross-session memory.
-- **Tool calling**: Built-in tools for file reading/writing, command execution, directory listing, and file searching. Tool definitions use JSON Schema so models can understand them.
+- **Tool calling**: Built-in tools for file reading/writing, command execution, directory listing, file searching, web search, and URL fetching. Tool definitions use JSON Schema so models can understand them. Tools are disabled by default; users must explicitly enable them in the frontend tool menu, preventing ordinary chat questions from being forced into tool calls.
+- **Multimodal attachments**: Supports uploading images, PDFs, DOCX, and text files. Images are sent as multimodal content to vision-capable models; text and document content is extracted and embedded into the user message.
+- **DSML/XML tool-call compatibility**: Some OpenAI-compatible models (e.g. DeepSeek, Kimi) emit tool calls inside message content as `<| | DSML | | tool_calls>` markup. The engine automatically parses this markup, executes the corresponding tools, and strips the raw markup from the final reply.
 - **Multi-protocol access**: The core engine exposes both gRPC (efficient internal communication) and HTTP/JSON (easy for frontends and third parties).
 - **Multiple clients**: Command-line CLI, Next.js web UI, and Tauri desktop client.
 - **Control-plane gateway**: The Go control plane handles session management, routing, CORS, and frontend proxying, decoupling the engine from the UI.
@@ -70,6 +74,8 @@ graph TD
 1. **Engine layer (`rsmgo-core`, Rust)**
    - Handles LLM interaction, tool orchestration, memory access, and gRPC/HTTP serving.
    - `Agent` is the orchestration core: receive request → enrich with historical memory → call provider → if tool calls exist, execute them → submit results back to the model for a final response.
+   - Tools are only exposed to the model when the request explicitly specifies `tool_names`; the frontend does not enable any tools by default, so normal chat questions do not trigger tool calls.
+   - For OpenAI-compatible models that emit tool calls as DSML/XML inside `content`, the engine parses the markup, executes the tools, and strips the raw markup from the reply shown to the user.
    - `ProviderRegistry` supports registering multiple providers at runtime. Anthropic uses its native protocol; everything else is treated as OpenAI-compatible.
    - `MemoryStore` provides transactional session and message storage via `rusqlite`.
 
@@ -366,7 +372,7 @@ engine:
 
 ### `providers`
 
-Configure available LLM providers. `anthropic` uses the native Anthropic API; all other names are treated as OpenAI-compatible.
+Configure available LLM providers. `anthropic` uses the native Anthropic API; all other names are treated as OpenAI-compatible. `base_url` should end with `/v1`, and the model `id` must match a real model offered by the service, otherwise you will receive a 404 error.
 
 ```yaml
 providers:
@@ -377,11 +383,21 @@ providers:
     models:
       - id: "gpt-4o"
         display_name: "GPT-4o"
+
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "moonshot-v1-8k"
+    models:
+      - id: "moonshot-v1-8k"
+        display_name: "Moonshot V1 8K"
+      - id: "moonshot-v1-8k-vision-preview"
+        display_name: "Moonshot V1 8K Vision"
 ```
 
 ### `tools`
 
-Declare the default enabled tool whitelist.
+Declare the tool whitelist returned by the control plane at `/api/v1/tools` and registered by the engine. During a chat, tools are disabled by default and must be explicitly selected in the frontend tool menu before they are passed to the model.
 
 ```yaml
 tools:
@@ -391,6 +407,8 @@ tools:
     - execute_command
     - list_directory
     - search
+    - web_search
+    - fetch_url
 ```
 
 ### `control_plane`
@@ -411,6 +429,97 @@ control_plane:
 
 ---
 
+## Tool Usage
+
+### Enabling tools
+
+Tools require two steps to become active:
+
+1. **Server-side whitelist**: List the tools to register in `tools.enabled` in `app.yaml`. Tools not listed here will not appear in the frontend.
+2. **Frontend selection**: Manually check the tools you want to use in the chat tool menu (🛠). No tools are selected by default, so ordinary chat questions do not trigger tool calls.
+
+### Built-in tools
+
+| Tool name | Description | Parameters |
+|-----------|-------------|------------|
+| `read_file` | Read the contents of a file. | `path`: absolute or relative file path |
+| `write_file` | Write content to a file, creating parent directories as needed. | `path`: file path; `content`: file content |
+| `execute_command` | Execute a shell command and return stdout/stderr. | `command`: shell command; `working_dir` (optional): working directory |
+| `list_directory` | List files and subdirectories at a path. | `path`: directory path |
+| `search` | Recursively search for files by name pattern using `find`. | `directory`: search directory; `pattern`: filename pattern, e.g. `*.rs` |
+| `web_search` | Search the web. | `query`: search query |
+| `fetch_url` | Fetch and return the text content of a URL. | `url`: target URL |
+
+### Example
+
+Enable tools in `app.yaml`:
+
+```yaml
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - execute_command
+    - list_directory
+    - search
+    - web_search
+    - fetch_url
+```
+
+After restarting the engine, these tools appear in the frontend tool menu. If you check `list_directory` and send "list the current directory", the model may call:
+
+```json
+{
+  "name": "list_directory",
+  "arguments": { "path": "." }
+}
+```
+
+The tool result is returned to the model, which then generates the final natural-language answer.
+
+### Safety notes
+
+- `execute_command` and `write_file` actually run commands or write files; enable them with care.
+- Only enable write/execute tools for trusted models and sessions that explicitly need file-system or shell access.
+- Tools run in the local environment with the same permissions as the user who started rsmgo.
+
+---
+
+## Troubleshooting & Notes
+
+### 1. Kimi / Moonshot returns 404 `resource_not_found_error`
+
+This is usually caused by an incorrect `base_url` or model `id`. The official Moonshot API `base_url` is:
+
+```yaml
+base_url: "https://api.moonshot.cn/v1"
+```
+
+Valid model examples: `moonshot-v1-8k`, `moonshot-v1-32k`, `moonshot-v1-128k`, `moonshot-v1-8k-vision-preview`. If you use a third-party proxy or internal endpoint, make sure the address exists and the model ID matches what the provider offers.
+
+### 2. The model cannot "see" uploaded images
+
+Only vision-capable models can process images as multimodal content. Non-vision models (e.g. `deepseek-chat`) only see the file-name text. To understand images, enable a vision model in `app.yaml`, for example:
+
+```yaml
+providers:
+  - name: kimi
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    default_model: "moonshot-v1-8k-vision-preview"
+    models:
+      - id: "moonshot-v1-8k-vision-preview"
+        display_name: "Moonshot V1 8K Vision"
+```
+
+Other vision options include OpenAI `gpt-4o`, Gemini `gemini-2.5-flash`, and Qwen `qwen-vl-max`.
+
+### 3. Ordinary questions trigger tool calls
+
+Tools are not enabled by default. When no tools are checked in the chat tool menu, the model receives no tool definitions and will answer directly. Tool calls only happen when you explicitly enable one or more tools and the model decides they are needed.
+
+---
+
 ## Component Reference
 
 ### rsmgo-core (Rust engine)
@@ -427,13 +536,7 @@ control_plane:
 
 ### Built-in tools
 
-| Tool name | Description |
-|-----------|-------------|
-| `read_file` | Read the contents of a file. |
-| `write_file` | Write content to a file, creating parent directories as needed. |
-| `execute_command` | Execute a shell command and return its output. |
-| `list_directory` | List files and subdirectories at a path. |
-| `search` | Recursively search for files by name pattern using `find`. |
+See the [Tool Usage](#tool-usage) section for the full list of built-in tools, their parameters, and safety notes. The tools are implemented in `crates/rsmgo-core/src/tools/`.
 
 ### control (Go control plane)
 
@@ -456,7 +559,7 @@ control_plane:
 | File/Directory | Description |
 |----------------|-------------|
 | `app/page.tsx` | Main page with session sidebar and active chat area. |
-| `components/Chat.tsx` | Message list, input box, and send logic. |
+| `components/Chat.tsx` | Message list, input box, attachment upload, and send logic. Tools are disabled by default and must be enabled via the tool menu. |
 | `lib/api.ts` | Client wrapper for control-plane `/api/v1/*` endpoints. |
 | `next.config.js` | Standalone output and API reverse-proxy configuration. |
 

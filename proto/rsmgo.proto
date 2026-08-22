@@ -35,6 +35,12 @@ message Message {
   string content = 2;
   string tool_call_id = 3; // optional, for tool role
   repeated ToolCall tool_calls = 4; // optional, for assistant role with tool calls
+  repeated MultiModalPart parts = 5; // optional, for multimodal (vision/file) content
+}
+
+message MultiModalPart {
+  string content_type = 1; // e.g. image/png, image/jpeg
+  string data = 2;         // base64-encoded bytes
 }
 
 message ToolCall {

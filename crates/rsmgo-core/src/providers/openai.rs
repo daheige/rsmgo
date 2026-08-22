@@ -103,17 +103,48 @@ impl OpenAiCompatibleProvider {
             "kimi",
             "https://api.moonshot.cn/v1".to_string(),
             std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
-            "kimi-latest",
+            "moonshot-v1-8k",
             vec![
                 ModelInfo {
-                    id: "kimi-latest".to_string(),
+                    id: "moonshot-v1-8k".to_string(),
                     provider: "kimi".to_string(),
-                    display_name: "Kimi Latest".to_string(),
+                    display_name: "Moonshot V1 8K".to_string(),
                 },
                 ModelInfo {
-                    id: "kimi-k2-0711-preview".to_string(),
+                    id: "moonshot-v1-32k".to_string(),
                     provider: "kimi".to_string(),
-                    display_name: "Kimi K2".to_string(),
+                    display_name: "Moonshot V1 32K".to_string(),
+                },
+                ModelInfo {
+                    id: "moonshot-v1-128k".to_string(),
+                    provider: "kimi".to_string(),
+                    display_name: "Moonshot V1 128K".to_string(),
+                },
+                ModelInfo {
+                    id: "moonshot-v1-8k-vision-preview".to_string(),
+                    provider: "kimi".to_string(),
+                    display_name: "Moonshot V1 8K Vision".to_string(),
+                },
+            ],
+        )
+    }
+
+    pub fn default_gemini() -> Self {
+        Self::new(
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            std::env::var("GEMINI_API_KEY").unwrap_or_default(),
+            "gemini-2.5-flash",
+            vec![
+                ModelInfo {
+                    id: "gemini-2.5-flash".to_string(),
+                    provider: "gemini".to_string(),
+                    display_name: "Gemini 2.5 Flash".to_string(),
+                },
+                ModelInfo {
+                    id: "gemini-2.5-pro".to_string(),
+                    provider: "gemini".to_string(),
+                    display_name: "Gemini 2.5 Pro".to_string(),
                 },
             ],
         )
@@ -132,11 +163,50 @@ struct OpenAiChatRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+/// Build the OpenAI content field for a message. Plain text messages stay a
+/// string; messages carrying images become a multimodal content array of
+/// `text` and `image_url` (data URL) parts.
+fn openai_content(m: &Message, include_images: bool) -> serde_json::Value {
+    if !include_images || m.parts.is_empty() {
+        return serde_json::Value::String(m.content.clone());
+    }
+    let mut parts: Vec<serde_json::Value> =
+        vec![json!({ "type": "text", "text": m.content.clone() })];
+    for img in &m.parts {
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", img.content_type, img.data) }
+        }));
+    }
+    serde_json::Value::Array(parts)
+}
+
+/// Best-effort detection of vision-capable models for OpenAI-compatible
+/// providers. When uncertain, returns false so image content is dropped rather
+/// than causing a hard API error on text-only models (e.g. deepseek-chat).
+fn is_vision_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    [
+        "vl",
+        "vision",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-4-turbo",
+        "gpt-5",
+        "gemini",
+        "claude",
+        "glm-4v",
+        "kimi-k2",
+    ]
+    .iter()
+    .any(|marker| m.contains(marker))
 }
 
 #[derive(Debug, Serialize)]
@@ -212,12 +282,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
             request.model
         };
 
+        let include_images = is_vision_model(&model);
+
         let messages: Vec<OpenAiMessage> = request
             .messages
             .iter()
             .map(|m| OpenAiMessage {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: openai_content(m, include_images),
                 tool_call_id: m.tool_call_id.clone(),
                 tool_calls: m.tool_calls.as_ref().map(|tcs| {
                     tcs.iter()
@@ -322,6 +394,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 content: msg.content.unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: None,
+                parts: vec![],
             },
             tool_calls,
             usage,
