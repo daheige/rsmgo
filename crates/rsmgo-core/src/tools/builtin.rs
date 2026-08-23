@@ -2,8 +2,15 @@ use crate::error::{Result, RsmgoError};
 use crate::tools::{Tool, ToolContext};
 use serde_json::json;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Maximum wall-clock time a single shell command may run before it is killed.
+/// Prevents long-lived commands (e.g. `node server.js`) from blocking the whole
+/// request until the control plane's gRPC deadline.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Percent-encode a file name so it is safe to use inside a Markdown link href.
 fn percent_encode_filename(name: &str) -> String {
@@ -146,7 +153,7 @@ impl Tool for WriteFileTool {
                 let encoded_name = percent_encode_filename(file_name);
                 let download_link = format!("/api/v1/files/{}", encoded_name);
                 Ok(format!(
-                    "File written: {}\nDownload: [下载 {}]({})",
+                    "File written: {}\nDownload: [Download {}]({})",
                     relative, file_name, download_link
                 ))
             }
@@ -187,17 +194,56 @@ impl Tool for ExecuteCommandTool {
         } else if let Some(dir) = &ctx.workspace {
             cmd.current_dir(dir);
         }
-        let output = cmd
-            .output()
+
+        // Spawn with piped output so we can enforce a timeout. `Command::output`
+        // blocks until the child exits, so a long-lived command (`node server.js`)
+        // would stall the request indefinitely. We poll `try_wait` instead.
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
             .map_err(|e| RsmgoError::Tool(format!("failed to execute command: {}", e)))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() {
+
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if started.elapsed() >= COMMAND_TIMEOUT {
+                        // Kill the child and report a timeout. We deliberately do
+                        // not drain the pipes here: a surviving grandchild could
+                        // still hold the write end open and block the read.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(RsmgoError::Tool(format!(
+                            "command timed out after {}s and was killed. The command likely does not exit (a server, watcher, or REPL). Do not retry it — write your output and tell the user how to run it separately.",
+                            COMMAND_TIMEOUT.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    return Err(RsmgoError::Tool(format!(
+                        "failed to wait for command: {}",
+                        e
+                    )));
+                }
+            }
+        };
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut stdout);
+        }
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_string(&mut stderr);
+        }
+        if status.success() {
             Ok(format!("{}{}", stdout, stderr))
         } else {
             Err(RsmgoError::Tool(format!(
                 "command failed ({}): {} {}",
-                output.status, stdout, stderr
+                status, stdout, stderr
             )))
         }
     }
@@ -329,7 +375,7 @@ mod tests {
         });
         let result = tool.execute(args, &ToolContext::default()).unwrap();
         assert!(result.contains("outputs/reports/summary.md"));
-        assert!(result.contains("[下载 summary.md](/api/v1/files/summary.md)"));
+        assert!(result.contains("[Download summary.md](/api/v1/files/summary.md)"));
         assert_eq!(
             fs::read_to_string(workspace.join("outputs/reports/summary.md")).unwrap(),
             "hello"
@@ -346,7 +392,7 @@ mod tests {
             "content": "hello"
         });
         let result = tool.execute(args, &ToolContext::default()).unwrap();
-        assert!(result.contains("[下载 my file.md](/api/v1/files/my%20file.md)"));
+        assert!(result.contains("[Download my file.md](/api/v1/files/my%20file.md)"));
         let _ = fs::remove_dir_all(&workspace);
     }
 

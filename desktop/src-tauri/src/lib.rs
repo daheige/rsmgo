@@ -11,7 +11,7 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 async fn pick_directory() -> Option<String> {
     rfd::AsyncFileDialog::new()
-        .set_title("选择工作目录")
+        .set_title("Choose working directory")
         .pick_folder()
         .await
         .map(|handle| handle.path().to_string_lossy().to_string())

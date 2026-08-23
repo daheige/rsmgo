@@ -205,7 +205,7 @@ export default function Home() {
             />
           </div>
           <div style={styles.hint}>
-            工作区: {activeWorkspace ? activeWorkspace.name : "无"}
+            Workspace: {activeWorkspace ? activeWorkspace.name : "None"}
           </div>
         </div>
 
@@ -240,15 +240,15 @@ export default function Home() {
                 <div style={styles.actions} onClick={(e) => e.stopPropagation()}>
                   <button
                     style={{ ...styles.action, opacity: s.pinned ? 1 : 0.55 }}
-                    title={s.pinned ? "取消置顶" : "置顶"}
+                    title={s.pinned ? "Unpin" : "Pin"}
                     onClick={() => togglePin(s)}
                   >
                     📌
                   </button>
-                  <button style={styles.action} title="编辑标题" onClick={() => startRename(s)}>
+                  <button style={styles.action} title="Rename" onClick={() => startRename(s)}>
                     ✏️
                   </button>
-                  <button style={styles.action} title="删除会话" onClick={() => removeSession(s)}>
+                  <button style={styles.action} title="Delete session" onClick={() => removeSession(s)}>
                     🗑
                   </button>
                 </div>
@@ -260,26 +260,26 @@ export default function Home() {
 
         <div style={styles.workspaceSection}>
           <div style={styles.workspaceHeader}>
-            <strong>工作区</strong>
+            <strong>Workspaces</strong>
             <button
               style={styles.addWorkspace}
               onClick={openAddWorkspace}
             >
-              ＋ 添加
+              ＋ Add
             </button>
           </div>
           {showAddWorkspace && (
             <div style={styles.newWorkspaceForm}>
               <input
                 style={styles.input}
-                placeholder="名称 (可选)"
+                placeholder="Name (optional)"
                 value={newWsName}
                 onChange={(e) => setNewWsName(e.target.value)}
               />
               <div style={styles.row}>
                 <input
                   style={{ ...styles.input, flex: 1 }}
-                  placeholder="目录路径 /path/to/dir"
+                  placeholder="Directory path /path/to/dir"
                   value={newWsPath}
                   onChange={(e) => setNewWsPath(e.target.value)}
                   onKeyDown={(e) => {
@@ -289,18 +289,18 @@ export default function Home() {
                 {api.isTauri() && (
                   <button
                     style={styles.addWorkspace}
-                    title="选择目录"
+                    title="Choose directory"
                     onClick={selectWorkspaceDirectory}
                   >
-                    选择目录
+                    Choose directory
                   </button>
                 )}
               </div>
               {!api.isTauri() && (
-                <div style={styles.hint}>浏览器环境不支持原生目录选择，请手动填写目录路径。</div>
+                <div style={styles.hint}>Native directory selection isn't available in the browser; enter the directory path manually.</div>
               )}
               <div style={styles.toolChecks}>
-                <div style={styles.toolChecksLabel}>允许使用的工具</div>
+                <div style={styles.toolChecksLabel}>Allowed tools</div>
                 {selectableWorkspaceTools.map((t) => (
                   <label key={t.name} style={styles.toolCheck}>
                     <input
@@ -313,8 +313,8 @@ export default function Home() {
                 ))}
               </div>
               <div style={styles.row}>
-                <button style={styles.newChat} onClick={addWorkspace}>添加</button>
-                <button style={styles.cancelButton} onClick={cancelAddWorkspace}>取消</button>
+                <button style={styles.newChat} onClick={addWorkspace}>Add</button>
+                <button style={styles.cancelButton} onClick={cancelAddWorkspace}>Cancel</button>
               </div>
             </div>
           )}
@@ -332,7 +332,7 @@ export default function Home() {
                   <span style={styles.workspaceName}>{w.name}</span>
                   <button
                     style={styles.action}
-                    title="删除工作区"
+                    title="Delete workspace"
                     onClick={(e) => {
                       e.stopPropagation();
                       removeWorkspace(w);
@@ -361,7 +361,7 @@ export default function Home() {
                 value={currentSession?.workspace_id ?? ""}
                 onChange={(e) => changeSessionWorkspace(currentId, e.target.value)}
               >
-                <option value="">无工作区</option>
+                <option value="">No workspace</option>
                 {workspaces.map((w) => (
                   <option key={w.id} value={w.id}>{w.name}</option>
                 ))}

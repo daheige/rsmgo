@@ -255,7 +255,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
                 <div style={styles.downloads}>
                   {downloads.map((d) => (
                     <a key={d.url} href={d.url} download={d.name} style={styles.downloadBtn}>
-                      ⬇ 下载 {d.name}
+                      ⬇ Download {d.name}
                     </a>
                   ))}
                 </div>
@@ -281,7 +281,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
                 <span style={styles.chipName}>{a.name}</span>
                 <button
                   style={styles.chipRemove}
-                  title="移除"
+                  title="Remove"
                   onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
                 >
                   ✕
@@ -312,7 +312,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
           />
           <button
             style={styles.iconButton}
-            title="上传文件"
+            title="Upload file"
             disabled={!sessionId}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -323,7 +323,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
               ...styles.iconButton,
               ...(webSearch ? styles.iconButtonActive : {}),
             }}
-            title="联网搜索"
+            title="Web search"
             disabled={!sessionId}
             onClick={() => setWebSearch((v) => !v)}
           >
@@ -332,7 +332,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
           <div style={styles.toolsWrap}>
             <button
               style={styles.iconButton}
-              title="更多工具"
+              title="More tools"
               disabled={!sessionId}
               onClick={() => setToolsOpen((v) => !v)}
             >

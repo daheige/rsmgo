@@ -15,6 +15,9 @@ emit the tool call immediately, and keep working with tools until the task is
 complete before writing your final summary.
 Emit tool calls with precise arguments.
 Always prefer safe, read-only operations unless the user explicitly asks for changes.
+Do not run long-lived processes (servers, watchers, REPLs) with execute_command —
+they never exit and will time out. Instead write the files and tell the user how
+to start them separately.
 "#;
 
 pub struct Agent {

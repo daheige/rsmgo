@@ -491,10 +491,10 @@ For example, without a workspace the tool result looks like:
 
 ```text
 File written: outputs/my.md
-Download: [下载 my.md](/api/v1/files/my.md)
+Download: [Download my.md](/api/v1/files/my.md)
 ```
 
-The frontend will show a green "下载 my.md" button.
+The frontend will show a green "Download my.md" button.
 
 - `write_file` only writes inside the resolved directory (`{data_dir}/outputs/`, or the workspace directory when one is set). Paths are interpreted relative to that directory, and any path containing `..` is rejected to prevent directory traversal.
 - The `/api/v1/files/{filename}` endpoint only serves files from `{data_dir}/outputs/` and uses a simple base-name lookup, so generated files cannot escape the workspace.
@@ -503,7 +503,7 @@ The frontend will show a green "下载 my.md" button.
 
 A workspace is a local directory the agent treats as its working directory — it reads and writes directly inside it. Manage workspaces from the sidebar:
 
-- **Add**: click **添加** to pick a directory through the native directory picker (desktop), then optionally adjust the name and check which tools the agent may use in that workspace (per-tool permissions; all tools are enabled by default). In a plain browser the picker is unavailable, so the path is entered manually.
+- **Add**: click **Add** to pick a directory through the native directory picker (desktop), then optionally adjust the name and check which tools the agent may use in that workspace (per-tool permissions; all tools are enabled by default). In a plain browser the picker is unavailable, so the path is entered manually.
 - **Select**: each session has a workspace selector in the chat header; new sessions inherit the currently selected sidebar workspace.
 - **Remove**: delete a workspace from the sidebar (this only removes the reference, never the directory or its files).
 
