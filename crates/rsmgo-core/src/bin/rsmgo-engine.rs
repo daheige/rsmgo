@@ -1,4 +1,4 @@
-use rsmgo_core::agent::Agent;
+use rsmgo_core::agent::{Agent, DEFAULT_SYSTEM_PROMPT};
 use rsmgo_core::config::AppConfig;
 use rsmgo_core::memory::MemoryStore;
 use rsmgo_core::providers::registry_from_config;
@@ -20,9 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let memory = Arc::new(MemoryStore::open(data_dir.join("memory.db"))?);
 
     let providers = registry_from_config(&config);
-    let mut agent = Agent::new(memory).with_providers(providers);
+    let mut agent = Agent::new(memory, &data_dir).with_providers(providers);
     if let Some(prompt) = &config.engine.system_prompt {
-        agent = agent.with_system_prompt(prompt.clone());
+        // Combine the configured prompt with the default prompt so critical
+        // instructions (e.g. preserving write_file download links) are not lost.
+        agent = agent.with_system_prompt(format!("{}\n\n{}", DEFAULT_SYSTEM_PROMPT, prompt));
     }
     let agent = Arc::new(agent);
 

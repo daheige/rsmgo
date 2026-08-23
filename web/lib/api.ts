@@ -34,8 +34,18 @@ export interface ChatOptions {
   attachmentIds?: string[];
 }
 
+// In development, talk directly to the control plane to avoid Next.js dev
+// proxy timeout/ECONNRESET issues on long chat requests. In production the
+// app is served standalone and requests stay same-origin.
+function baseUrl(): string {
+  if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+    return process.env.NEXT_PUBLIC_RSMGO_CONTROL_URL || "http://localhost:9090";
+  }
+  return "";
+}
+
 export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(`${baseUrl()}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
@@ -97,7 +107,7 @@ export async function chat(
 export async function uploadFile(file: File): Promise<Attachment> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch("/api/v1/uploads", {
+  const res = await fetch(`${baseUrl()}/api/v1/uploads`, {
     method: "POST",
     body: form,
   });

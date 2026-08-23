@@ -51,7 +51,7 @@ async fn build_agent() -> Result<(Arc<Agent>, String)> {
     let memory = Arc::new(MemoryStore::open(data_dir.join("memory.db"))?);
 
     let providers = registry_from_config(&config);
-    let mut agent = Agent::new(memory).with_providers(providers);
+    let mut agent = Agent::new(memory, &data_dir).with_providers(providers);
     if let Some(prompt) = &config.engine.system_prompt {
         agent = agent.with_system_prompt(prompt.clone());
     }

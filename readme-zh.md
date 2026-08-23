@@ -382,7 +382,7 @@ engine:
 - `http_addr`：引擎内置 HTTP/JSON 调试接口的监听地址，仅当 `app_http_debug` 为 `true` 时启动。
 - `app_http_debug`：是否启动 HTTP 调试接口。`false`（默认）时仅监听 gRPC，减少端口暴露；`true` 时同时监听 gRPC 与 HTTP，便于本地调试。详见 [rsmgo http 服务调试](#rsmgo-http服务调试)。
 - `data_dir`：SQLite 数据库与相关持久化文件存放路径，支持相对路径（如 `./share/rsmgo`）以及 `~` 主目录展开（如 `~/.local/share/rsmgo`）。
-- `system_prompt`：覆盖默认系统提示词。
+- `system_prompt`：前置到默认系统提示词之前。最终提示词为 `{默认系统提示词}\n\n{system_prompt}`，因此即使配置了自定义提示词，保留 `write_file` 下载链接等关键指令也会始终生效。
 
 ### `providers`
 
@@ -457,7 +457,7 @@ control_plane:
 | 工具名 | 说明 | 参数 |
 |--------|------|------|
 | `read_file` | 读取指定文件内容。 | `path`: 文件绝对或相对路径 |
-| `write_file` | 写入内容到文件，自动创建父目录。 | `path`: 文件路径；`content`: 文件内容 |
+| `write_file` | 写入内容到工作区 `outputs/` 目录下的文件，自动创建父目录。 | `path`: `outputs/` 内的文件名或相对路径；`content`: 文件内容 |
 | `execute_command` | 执行 shell 命令并返回 stdout/stderr。 | `command`: 命令；`working_dir`（可选）: 工作目录 |
 | `list_directory` | 列出目录下的文件与子目录。 | `path`: 目录路径 |
 | `search` | 使用 `find` 按文件名模式递归搜索。 | `directory`: 搜索目录；`pattern`: 文件名模式，如 `*.rs` |
@@ -490,6 +490,22 @@ tools:
 ```
 
 工具执行结果会回传给模型，模型再生成最终的自然语言回答。
+
+### 文件写入与下载
+
+`write_file` 工具会把文件保存到 `{data_dir}/outputs/` 目录，并返回下载链接。模型在最终回答中保留该链接后，前端会自动渲染“下载”按钮，用户可通过 `/api/v1/files/{filename}` 下载文件。
+
+例如工具返回：
+
+```text
+File written: outputs/my.md
+Download: [下载 my.md](/api/v1/files/my.md)
+```
+
+前端会显示一个绿色的“下载 my.md”按钮。
+
+- `write_file` 仅在 `{data_dir}/outputs/` 目录内写入文件。路径相对于该目录解析，任何包含 `..` 的路径都会被拒绝，以防止目录遍历。
+- `/api/v1/files/{filename}` 端点只提供 `{data_dir}/outputs/` 下的文件，并使用简单的 basename 查找，因此生成的文件无法逃逸出工作区。
 
 ### 安全提示
 
@@ -632,7 +648,7 @@ curl http://127.0.0.1:8080/api/v1/providers
 | 文件/目录 | 说明 |
 |-----------|------|
 | `app/page.tsx` | 主页面，会话侧边栏与当前聊天区。 |
-| `components/Chat.tsx` | 消息列表、输入框、附件上传与发送逻辑。工具默认不启用，需通过工具菜单手动勾选。 |
+| `components/Chat.tsx` | 消息列表、输入框、附件上传与发送逻辑。助手消息以 Markdown 渲染，文件下载链接会显示为下载按钮。工具默认不启用，需通过工具菜单手动勾选。 |
 | `lib/api.ts` | 对控制面 `/api/v1/*` 接口的封装。 |
 | `next.config.js` | standalone 输出与 API 反向代理配置。 |
 

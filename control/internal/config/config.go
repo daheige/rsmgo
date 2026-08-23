@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,7 +48,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Addr:       firstNonEmpty(ac.ControlPlane.Addr, ":9090"),
 		EngineAddr: firstNonEmpty(ac.ControlPlane.EngineAddr, ac.Engine.GrpcAddr, "127.0.0.1:50051"),
-		DataDir:    firstNonEmpty(ac.Engine.DataDir, "./share/rsmgo"),
+		DataDir:    expandTilde(firstNonEmpty(ac.Engine.DataDir, "./share/rsmgo")),
 	}
 
 	for _, p := range ac.Providers {
@@ -58,14 +59,12 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// configPath resolves the app.yaml location: $RSMGO_CONFIG, then ./app.yaml,
-// then ~/.config/rsmgo/app.yaml.
+// configPath resolves the app.yaml location: $RSMGO_CONFIG, then
+// ~/.config/rsmgo/app.yaml, then ./app.yaml. This matches the Rust engine's
+// resolution order so both sides read the same file.
 func configPath() string {
 	if p := os.Getenv("RSMGO_CONFIG"); p != "" {
 		return p
-	}
-	if _, err := os.Stat("app.yaml"); err == nil {
-		return "app.yaml"
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		candidate := filepath.Join(home, ".config", "rsmgo", "app.yaml")
@@ -74,6 +73,18 @@ func configPath() string {
 		}
 	}
 	return "app.yaml"
+}
+
+// expandTilde expands a leading "~/" to the user's home directory.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 func firstNonEmpty(values ...string) string {

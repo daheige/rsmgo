@@ -1,9 +1,10 @@
-pub mod builtin;
-pub mod web;
-
 use crate::error::{Result, RsmgoError};
 pub use crate::types::ToolDefinition;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+pub mod builtin;
+pub mod web;
 
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -63,9 +64,18 @@ impl ToolRegistry {
 
 impl Default for ToolRegistry {
     fn default() -> Self {
+        Self::with_workspace(".")
+    }
+}
+
+impl ToolRegistry {
+    /// Create a registry with the built-in tools, using `workspace_dir` as the
+    /// base directory for file output tools.
+    pub fn with_workspace(workspace_dir: impl Into<PathBuf>) -> Self {
+        let workspace_dir = workspace_dir.into();
         let mut registry = Self::new();
         registry.register(Box::new(builtin::ReadFileTool));
-        registry.register(Box::new(builtin::WriteFileTool));
+        registry.register(Box::new(builtin::WriteFileTool::new(workspace_dir)));
         registry.register(Box::new(builtin::ExecuteCommandTool));
         registry.register(Box::new(builtin::ListDirectoryTool));
         registry.register(Box::new(builtin::SearchTool));

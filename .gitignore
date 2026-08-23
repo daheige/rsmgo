@@ -56,3 +56,4 @@ web/.next/
 # Tauri build output
 desktop/src-tauri/target/
 app.exam.yaml
+.next

@@ -171,9 +171,13 @@ const styles: Record<string, React.CSSProperties> = {
   layout: {
     display: "flex",
     height: "100vh",
+    minWidth: "1600px",
+    maxWidth: "3300px",
+    margin: "0 auto",
   },
   sidebar: {
     width: "280px",
+    flexShrink: 0,
     background: "#1e293b",
     padding: "1rem",
     display: "flex",
@@ -290,6 +294,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "1rem",
     display: "flex",
     flexDirection: "column",
+    minWidth: 0,
+    overflow: "hidden",
   },
   empty: {
     flex: 1,

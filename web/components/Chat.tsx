@@ -1,9 +1,76 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import * as api from "@/lib/api";
 
 const WEB_SEARCH_TOOL = "web_search";
+
+interface DownloadLink {
+  name: string;
+  url: string;
+}
+
+// Some providers return escape sequences (\n, \t, \") literally inside message
+// content. Convert them back to real characters so Markdown renders correctly.
+const unescapeContent = (content: string): string => {
+  return content
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+};
+
+// Rewrite model-generated file links to the canonical download endpoint.
+// Models often paraphrase the tool result and emit `[text](my.md)`,
+// `[text](/api/files/my.md)`, or `[text](/api/v1/files/my.md)`; this normalizes
+// them to `/api/v1/files/<basename>`.
+const normalizeFileLinks = (content: string): string => {
+  return content.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, href) => {
+    const trimmed = href.trim();
+    // Leave external URLs untouched.
+    if (/^https?:\/\//i.test(trimmed)) {
+      return match;
+    }
+    // Canonicalize file download links: strip query/fragment and keep only the base name.
+    const filePrefix = trimmed.startsWith("/api/v1/files/")
+      ? "/api/v1/files/"
+      : trimmed.startsWith("/api/files/")
+        ? "/api/files/"
+        : "";
+    if (filePrefix) {
+      const rawName = trimmed.slice(filePrefix.length);
+      const baseName = rawName.split(/[?#]/)[0];
+      if (baseName) {
+        return `[${text}](/api/v1/files/${encodeURIComponent(baseName)})`;
+      }
+      return match;
+    }
+    // Leave other internal API routes untouched.
+    if (trimmed.startsWith("/api/") || trimmed.startsWith("/health")) {
+      return match;
+    }
+    const base = trimmed.replace(/^\/+/, "").split("/").pop();
+    if (base && base.includes(".")) {
+      return `[${text}](/api/v1/files/${encodeURIComponent(base)})`;
+    }
+    return match;
+  });
+};
+
+const extractDownloads = (content: string): DownloadLink[] => {
+  const links: DownloadLink[] = [];
+  const regex = /\[([^\]]+)\]\(\/api(?:\/v1)?\/files\/([^)]+)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    const rawPath = match[2];
+    const cleanPath = rawPath.split(/[?#]/)[0];
+    const fileName = decodeURIComponent(cleanPath);
+    links.push({ name: fileName, url: `/api/v1/files/${encodeURIComponent(cleanPath)}` });
+  }
+  return links;
+};
 
 interface ChatProps {
   sessionId?: string;
@@ -32,9 +99,9 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
   useEffect(() => {
     if (toolsInitialized.current) return;
-    // No tools are enabled by default. The user must explicitly select them
-    // via the tools menu to avoid ordinary questions triggering tool calls.
-    setEnabledTools([]);
+    // Enable all selectable tools by default so file/command operations work
+    // out of the box. Users can still uncheck tools in the menu if needed.
+    setEnabledTools(selectableTools.map((t) => t.name));
     toolsInitialized.current = true;
   }, [tools]);
 
@@ -42,13 +109,13 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // Reset the textarea to the default height on mount so the browser does not
+  // restore a previously resized height.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = "auto";
-    const nextHeight = Math.min(el.scrollHeight, 120);
-    el.style.height = `${Math.max(nextHeight, 44)}px`;
-  }, [input]);
+    el.style.height = "200px";
+  }, []);
 
   const canSend = !loading && (input.trim().length > 0 || attachments.length > 0);
 
@@ -110,18 +177,65 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   return (
     <div style={styles.container}>
       <div style={styles.messages}>
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              ...styles.message,
-              alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-              background: m.role === "user" ? "#2563eb" : "#1e293b",
-            }}
-          >
-            {m.content}
-          </div>
-        ))}
+        {messages.map((m, i) => {
+          const displayContent =
+            m.role === "assistant"
+              ? normalizeFileLinks(unescapeContent(m.content))
+              : m.content;
+          const downloads =
+            m.role === "assistant" ? extractDownloads(displayContent) : [];
+          return (
+            <div
+              key={i}
+              style={{
+                ...styles.message,
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                background: m.role === "user" ? "#2563eb" : "#1e293b",
+              }}
+            >
+              <div className="markdown-content">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a: ({ href, children }) => {
+                      const isDownload =
+                        typeof href === "string" &&
+                        (href.startsWith("/api/v1/files/") ||
+                          href.startsWith("/api/files/"));
+                      let downloadName: string | undefined;
+                      if (isDownload && typeof href === "string") {
+                        const base = href
+                          .replace(/^\/api(?:\/v1)?\/files\//, "")
+                          .split(/[?#]/)[0];
+                        downloadName = decodeURIComponent(base);
+                      }
+                      return (
+                        <a
+                          href={href}
+                          download={downloadName}
+                          style={{ color: "#60a5fa" }}
+                        >
+                          {children}
+                        </a>
+                      );
+                    },
+                  }}
+                >
+                  {displayContent}
+                </ReactMarkdown>
+              </div>
+              {downloads.length > 0 && (
+                <div style={styles.downloads}>
+                  {downloads.map((d) => (
+                    <a key={d.url} href={d.url} download={d.name} style={styles.downloadBtn}>
+                      ⬇ 下载 {d.name}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
         {loading && <div style={styles.typing}>Thinking...</div>}
         {error && <div style={styles.error}>{error}</div>}
         <div ref={bottomRef} />
@@ -152,7 +266,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
         <textarea
           ref={textareaRef}
-          style={styles.input}
+          style={{ ...styles.input, height: "200px" }}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -213,11 +327,19 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
               </div>
             )}
           </div>
-          <span style={styles.spacer} />
-          <button style={styles.button} onClick={send} disabled={!sessionId || !canSend}>
-            Send
-          </button>
         </div>
+        <button
+          style={{
+            ...styles.button,
+            position: "absolute",
+            right: "0.75rem",
+            bottom: "0.75rem",
+          }}
+          onClick={send}
+          disabled={!sessionId || !canSend}
+        >
+          Send
+        </button>
       </div>
     </div>
   );
@@ -229,6 +351,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     height: "100%",
     gap: "1rem",
+    minWidth: 0,
   },
   messages: {
     flex: 1,
@@ -239,12 +362,12 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "1rem",
     background: "#020617",
     borderRadius: "0.5rem",
+    minWidth: 0,
   },
   message: {
     maxWidth: "80%",
     padding: "0.75rem 1rem",
     borderRadius: "0.5rem",
-    whiteSpace: "pre-wrap",
     wordBreak: "break-word",
   },
   typing: {
@@ -262,6 +385,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#1e293b",
     borderRadius: "0.75rem",
     position: "relative",
+    minWidth: 0,
   },
   chips: {
     display: "flex",
@@ -282,6 +406,26 @@ const styles: Record<string, React.CSSProperties> = {
   },
   chipIcon: {
     fontSize: "0.9rem",
+  },
+  downloadBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.35rem",
+    padding: "0.35rem 0.75rem",
+    borderRadius: "0.375rem",
+    background: "#059669",
+    color: "#fff",
+    textDecoration: "none",
+    fontSize: "0.85rem",
+    fontWeight: 500,
+  },
+  downloads: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "0.5rem",
+    marginTop: "0.75rem",
+    paddingTop: "0.75rem",
+    borderTop: "1px solid rgba(255,255,255,0.1)",
   },
   thumb: {
     width: "24px",
@@ -304,14 +448,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   input: {
     width: "100%",
-    minHeight: "44px",
-    maxHeight: "120px",
-    padding: "0.75rem 1rem",
+    minWidth: "1068px",
+    maxWidth: "100%",
+    minHeight: "200px",
+    padding: "0.75rem 1rem 3.75rem 1rem",
     borderRadius: "0.5rem",
     border: "1px solid #334155",
     background: "#0f172a",
     color: "#e2e8f0",
-    resize: "none",
+    resize: "both",
+    overflow: "auto",
     outline: "none",
     lineHeight: "1.25rem",
     boxSizing: "border-box",
@@ -320,6 +466,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "0.4rem",
+    flexWrap: "nowrap",
+    flexShrink: 0,
+    minWidth: 0,
   },
   iconButton: {
     border: "1px solid #334155",

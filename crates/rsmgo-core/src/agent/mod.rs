@@ -3,12 +3,15 @@ use crate::memory::MemoryStore;
 use crate::providers::{default_registry, ProviderRegistry};
 use crate::tools::{ToolDefinition, ToolRegistry};
 use crate::types::{ChatRequest, ChatResponse, Message, ToolCall};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-const DEFAULT_SYSTEM_PROMPT: &str = r#"
-You are rsmgo, a model-agnostic AI agent assistant. You can use tools when helpful.
-When you need to perform actions on the user's machine, emit tool calls with precise arguments.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"
+You are rsmgo, a model-agnostic AI agent assistant. You have access to tools.
+When a user asks you to write content to a file, you MUST use the write_file tool
+instead of just describing what you would write. Emit tool calls with precise arguments.
 Always prefer safe, read-only operations unless the user explicitly asks for changes.
+When you save a file with the write_file tool, the tool result contains a Markdown download link. Always preserve that link in your final response so the user can download the file.
 "#;
 
 pub struct Agent {
@@ -19,10 +22,11 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(memory: Arc<MemoryStore>) -> Self {
+    pub fn new(memory: Arc<MemoryStore>, workspace_dir: impl Into<PathBuf>) -> Self {
+        let workspace_dir = workspace_dir.into();
         Self {
             providers: default_registry(),
-            tools: ToolRegistry::default(),
+            tools: ToolRegistry::with_workspace(&workspace_dir),
             memory,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
         }
@@ -101,7 +105,21 @@ impl Agent {
                 .collect()
         };
 
+        tracing::info!(
+            session_id = %request.session_id,
+            provider = %request.provider,
+            model = %request.model,
+            tool_count = tool_defs.len(),
+            "chat request"
+        );
+
         let mut response = provider.chat(request.clone(), tool_defs.clone()).await?;
+
+        tracing::info!(
+            content_len = response.message.content.len(),
+            raw_tool_calls = response.tool_calls.len(),
+            "provider response"
+        );
 
         // Some OpenAI-compatible providers (e.g. DeepSeek, Kimi) return tool
         // calls as DSML/XML inside message.content instead of the structured
@@ -110,13 +128,23 @@ impl Agent {
         if !tool_defs.is_empty() && response.tool_calls.is_empty() {
             let dsml_calls = parse_dsml_tool_calls(&response.message.content);
             if !dsml_calls.is_empty() {
+                tracing::info!(count = dsml_calls.len(), "parsed DSML tool calls");
                 response.message.content = strip_dsml_tool_calls(&response.message.content);
                 response.tool_calls = dsml_calls;
+            } else {
+                let inline_calls = parse_inline_tool_calls(&response.message.content);
+                if !inline_calls.is_empty() {
+                    tracing::info!(count = inline_calls.len(), "parsed inline tool calls");
+                    response.message.content =
+                        strip_inline_tool_calls(&response.message.content);
+                    response.tool_calls = inline_calls;
+                }
             }
         }
 
         // Execute tool calls if any.
         if !response.tool_calls.is_empty() {
+            tracing::info!(count = response.tool_calls.len(), "executing tool calls");
             let assistant_message = Message::assistant_with_tool_calls(
                 response.message.content.clone(),
                 response.tool_calls.clone(),
@@ -128,8 +156,14 @@ impl Agent {
             for tc in &response.tool_calls {
                 let result = self.tools.execute(&tc.name, tc.arguments.clone());
                 let content = match result {
-                    Ok(out) => out,
-                    Err(e) => format!("Error: {}", e),
+                    Ok(out) => {
+                        tracing::info!(tool = %tc.name, "tool executed successfully");
+                        out
+                    }
+                    Err(e) => {
+                        tracing::warn!(tool = %tc.name, error = %e, "tool execution failed");
+                        format!("Error: {}", e)
+                    }
                 };
                 tool_results.push(Message::tool(content, &tc.id));
             }
@@ -153,12 +187,18 @@ impl Agent {
                 stream: false,
             };
 
+            tracing::info!("calling provider with tool results");
             let final_response = provider.chat(follow_up_request, Vec::new()).await?;
+            tracing::info!(
+                content_len = final_response.message.content.len(),
+                "final provider response"
+            );
             self.memory
                 .add_message(&request.session_id, &final_response.message)?;
             return Ok(final_response);
         }
 
+        tracing::info!("no tool calls, returning direct response");
         self.memory
             .add_message(&request.session_id, &response.message)?;
         Ok(response)
@@ -262,5 +302,163 @@ fn strip_dsml_tool_calls(content: &str) -> String {
         before.to_string()
     } else {
         format!("{}\n\n{}", before, after)
+    }
+}
+
+/// Parse inline tool calls that some providers emit directly inside
+/// message.content, e.g. `write_file:0{"file_path": "my.md", ...}`.
+fn parse_inline_tool_calls(content: &str) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    let mut i = 0;
+    while i < content.len() {
+        if let Some((name_len, index_len, brace_pos)) = find_inline_call_prefix(&content[i..]) {
+            let name_start = i;
+            let name_end = name_start + name_len;
+            let brace_abs = i + brace_pos;
+            if let Some(json_end) = find_matching_brace(content, brace_abs) {
+                let raw_json = &content[brace_abs..=json_end];
+                // Some models emit literal newlines inside JSON string values
+                // (e.g. the content of a write_file call). Escape them so
+                // serde_json can parse the block.
+                let escaped_json = raw_json
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t");
+                if let Ok(arguments) = serde_json::from_str(&escaped_json) {
+                    let name = content[name_start..name_end].to_string();
+                    let index = content[name_end + 1..name_end + 1 + index_len].to_string();
+                    calls.push(ToolCall {
+                        id: format!("inline-{}", index),
+                        name,
+                        arguments,
+                    });
+                    i = json_end + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    calls
+}
+
+/// Look for a prefix of the form `tool_name:digits{` and return the length of
+/// the tool name, the length of the index, and the position of the opening brace
+/// relative to the start of the string.
+fn find_inline_call_prefix(s: &str) -> Option<(usize, usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if i >= bytes.len() || !is_name_start(bytes[i]) {
+        return None;
+    }
+    let name_start = i;
+    i += 1;
+    while i < bytes.len() && is_name_char(bytes[i]) {
+        i += 1;
+    }
+    let name_len = i - name_start;
+    if i >= bytes.len() || bytes[i] != b':' {
+        return None;
+    }
+    i += 1;
+    let index_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let index_len = i - index_start;
+    if index_len == 0 || i >= bytes.len() || bytes[i] != b'{' {
+        return None;
+    }
+    Some((name_len, index_len, i))
+}
+
+fn is_name_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_name_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Find the closing brace matching the opening brace at `open_pos`, respecting
+/// string literals and nested braces.
+fn find_matching_brace(content: &str, open_pos: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    if open_pos >= bytes.len() || bytes[open_pos] != b'{' {
+        return None;
+    }
+    let mut depth = 1;
+    let mut in_string = false;
+    let mut escape = false;
+    for i in (open_pos + 1)..bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Remove inline tool-call blocks from content so they are not rendered to the user.
+fn strip_inline_tool_calls(content: &str) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    let mut last_end = 0;
+    while i < content.len() {
+        if let Some((_, _, brace_pos)) = find_inline_call_prefix(&content[i..]) {
+            let brace_abs = i + brace_pos;
+            if let Some(json_end) = find_matching_brace(content, brace_abs) {
+                result.push_str(&content[last_end..i]);
+                last_end = json_end + 1;
+                i = last_end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    result.push_str(&content[last_end..]);
+    result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_inline_write_file_with_newlines() {
+        let content = "I will create my.md. write_file:4{\"file_path\":\"my.md\",\"content\":\"# Node.js 简介\n\n## 什么是 Node.js?\n\nNode.js is...\"}";
+        let calls = parse_inline_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["file_path"], "my.md");
+        assert_eq!(
+            calls[0].arguments["content"].as_str().unwrap(),
+            "# Node.js 简介\n\n## 什么是 Node.js?\n\nNode.js is..."
+        );
+    }
+
+    #[test]
+    fn strip_inline_tool_call_removes_block() {
+        let content = "I will create my.md. write_file:4{\"file_path\":\"my.md\",\"content\":\"hello\"} Done.";
+        let stripped = strip_inline_tool_calls(content);
+        assert_eq!(stripped, "I will create my.md.  Done.");
     }
 }

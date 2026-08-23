@@ -9,6 +9,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,9 +37,10 @@ type Server struct {
 	providers       []string
 	defaultProvider string
 	uploadDir       string
+	outputsDir      string
 }
 
-func NewServer(engineClient *engine.Client, store *session.Store, providers []string, uploadDir string) *Server {
+func NewServer(engineClient *engine.Client, store *session.Store, providers []string, dataDir string) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -49,7 +51,10 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 		defaultProvider = providers[0]
 	}
 
+	uploadDir := filepath.Join(dataDir, "uploads")
+	outputsDir := filepath.Join(dataDir, "outputs")
 	_ = os.MkdirAll(uploadDir, 0o755)
+	_ = os.MkdirAll(outputsDir, 0o755)
 
 	s := &Server{
 		engine:          engineClient,
@@ -58,6 +63,7 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 		providers:       providers,
 		defaultProvider: defaultProvider,
 		uploadDir:       uploadDir,
+		outputsDir:      outputsDir,
 	}
 	s.registerRoutes()
 	return s
@@ -76,10 +82,23 @@ func (s *Server) registerRoutes() {
 	s.router.DELETE("/api/v1/sessions/:id", s.deleteSession)
 	s.router.POST("/api/v1/uploads", s.uploadFile)
 	s.router.GET("/api/v1/uploads/:id", s.downloadFile)
+	s.router.GET("/api/v1/files/:name", s.downloadOutputFile)
+	// Compatibility redirect for models that emit the unversioned /api/files/ path.
+	s.router.GET("/api/files/:name", s.redirectOutputFile)
 }
 
 func (s *Server) Run(addr string) error {
-	return s.router.Run(addr)
+	// Use a custom http.Server with generous timeouts so long-running chat
+	// requests (model API calls, tool execution loops) are not cut off by the
+	// control plane before the engine responds.
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      s.router,
+		ReadTimeout:  5 * time.Minute,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  2 * time.Minute,
+	}
+	return server.ListenAndServe()
 }
 
 func corsMiddleware() gin.HandlerFunc {
@@ -376,6 +395,38 @@ func (s *Server) downloadFile(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	c.Data(http.StatusOK, contentType, data)
+}
+
+// redirectOutputFile redirects the legacy unversioned /api/files/:name path to
+// the canonical /api/v1/files/:name endpoint. Some models emit the shorter
+// path in their final response, so this keeps those links working.
+func (s *Server) redirectOutputFile(c *gin.Context) {
+	name := c.Param("name")
+	c.Redirect(http.StatusMovedPermanently, "/api/v1/files/"+name)
+}
+
+// downloadOutputFile serves files written by the write_file tool from the
+// workspace outputs directory. The file name is restricted to a simple base
+// name to prevent directory traversal.
+func (s *Server) downloadOutputFile(c *gin.Context) {
+	name := c.Param("name")
+	name = filepath.Base(name)
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
+	}
+	if name == "" || name == "." || name == "/" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file name"})
+		return
+	}
+	path := filepath.Join(s.outputsDir, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+	contentType := http.DetectContentType(data)
+	c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
 	c.Data(http.StatusOK, contentType, data)
 }
 

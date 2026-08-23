@@ -368,7 +368,7 @@ engine:
 ```
 
 - `data_dir`: Directory for SQLite and related persistence files. Supports relative paths (e.g. `./share/rsmgo`) as well as `~` home-directory expansion (e.g. `~/.local/share/rsmgo`).
-- `system_prompt`: Overrides the default system prompt.
+- `system_prompt`: Prepended to the default system prompt. The final prompt becomes `{DEFAULT_SYSTEM_PROMPT}\n\n{system_prompt}`, so critical instructions (such as preserving `write_file` download links) are always present even when a custom prompt is configured.
 
 ### `providers`
 
@@ -443,7 +443,7 @@ Tools require two steps to become active:
 | Tool name | Description | Parameters |
 |-----------|-------------|------------|
 | `read_file` | Read the contents of a file. | `path`: absolute or relative file path |
-| `write_file` | Write content to a file, creating parent directories as needed. | `path`: file path; `content`: file content |
+| `write_file` | Write content to a file under the workspace `outputs/` directory, creating parent directories if needed. | `path`: file name or relative path inside `outputs/`; `content`: file content |
 | `execute_command` | Execute a shell command and return stdout/stderr. | `command`: shell command; `working_dir` (optional): working directory |
 | `list_directory` | List files and subdirectories at a path. | `path`: directory path |
 | `search` | Recursively search for files by name pattern using `find`. | `directory`: search directory; `pattern`: filename pattern, e.g. `*.rs` |
@@ -476,6 +476,22 @@ After restarting the engine, these tools appear in the frontend tool menu. If yo
 ```
 
 The tool result is returned to the model, which then generates the final natural-language answer.
+
+### File writes and downloads
+
+The `write_file` tool saves files to `{data_dir}/outputs/` and returns a Markdown download link. When the model preserves that link in its final response, the frontend automatically renders a "Download" button, and the file is served at `/api/v1/files/{filename}`.
+
+For example, the tool result looks like:
+
+```text
+File written: outputs/my.md
+Download: [下载 my.md](/api/v1/files/my.md)
+```
+
+The frontend will show a green "下载 my.md" button.
+
+- `write_file` only writes inside `{data_dir}/outputs/`. Paths are interpreted relative to that directory, and any path containing `..` is rejected to prevent directory traversal.
+- The `/api/v1/files/{filename}` endpoint only serves files from `{data_dir}/outputs/` and uses a simple base-name lookup, so generated files cannot escape the workspace.
 
 ### Safety notes
 
@@ -559,7 +575,7 @@ See the [Tool Usage](#tool-usage) section for the full list of built-in tools, t
 | File/Directory | Description |
 |----------------|-------------|
 | `app/page.tsx` | Main page with session sidebar and active chat area. |
-| `components/Chat.tsx` | Message list, input box, attachment upload, and send logic. Tools are disabled by default and must be enabled via the tool menu. |
+| `components/Chat.tsx` | Message list, input box, attachment upload, and send logic. Assistant messages are rendered as Markdown and file download links are surfaced as download buttons. Tools are disabled by default and must be enabled via the tool menu. |
 | `lib/api.ts` | Client wrapper for control-plane `/api/v1/*` endpoints. |
 | `next.config.js` | Standalone output and API reverse-proxy configuration. |
 
