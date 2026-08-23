@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/daheige/rsmgo/control/internal/engine"
 	"github.com/daheige/rsmgo/control/internal/session"
+	"github.com/daheige/rsmgo/control/internal/workspace"
 	pb "github.com/daheige/rsmgo/pb"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,11 +35,15 @@ const maxImageBytes = 10 * 1024 * 1024
 type Server struct {
 	engine          *engine.Client
 	sessions        *session.Store
+	workspaces      *workspace.Store
 	router          *gin.Engine
 	providers       []string
 	defaultProvider string
 	uploadDir       string
 	outputsDir      string
+	// activeChats maps session id -> context cancel func for in-flight chat
+	// requests, so a user can stop generation.
+	activeChats sync.Map
 }
 
 func NewServer(engineClient *engine.Client, store *session.Store, providers []string, dataDir string) *Server {
@@ -56,9 +62,12 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 	_ = os.MkdirAll(uploadDir, 0o755)
 	_ = os.MkdirAll(outputsDir, 0o755)
 
+	workspaceStore := workspace.NewStore(filepath.Join(dataDir, "workspaces"))
+
 	s := &Server{
 		engine:          engineClient,
 		sessions:        store,
+		workspaces:      workspaceStore,
 		router:          r,
 		providers:       providers,
 		defaultProvider: defaultProvider,
@@ -79,12 +88,17 @@ func (s *Server) registerRoutes() {
 	s.router.GET("/api/v1/sessions/:id", s.getSession)
 	s.router.PATCH("/api/v1/sessions/:id", s.updateSession)
 	s.router.POST("/api/v1/sessions/:id/chat", s.chat)
+	s.router.POST("/api/v1/sessions/:id/chat/cancel", s.cancelChat)
 	s.router.DELETE("/api/v1/sessions/:id", s.deleteSession)
 	s.router.POST("/api/v1/uploads", s.uploadFile)
 	s.router.GET("/api/v1/uploads/:id", s.downloadFile)
 	s.router.GET("/api/v1/files/:name", s.downloadOutputFile)
 	// Compatibility redirect for models that emit the unversioned /api/files/ path.
 	s.router.GET("/api/files/:name", s.redirectOutputFile)
+	s.router.GET("/api/v1/workspaces", s.listWorkspaces)
+	s.router.POST("/api/v1/workspaces", s.createWorkspace)
+	s.router.DELETE("/api/v1/workspaces/:id", s.deleteWorkspace)
+	s.router.GET("/api/v1/workspaces/:id/files/:name", s.downloadWorkspaceFile)
 }
 
 func (s *Server) Run(addr string) error {
@@ -104,7 +118,7 @@ func (s *Server) Run(addr string) error {
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -176,9 +190,10 @@ func (s *Server) listSessions(c *gin.Context) {
 }
 
 type createSessionRequest struct {
-	Title    string `json:"title"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	Title       string `json:"title"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	WorkspaceID string `json:"workspace_id"`
 }
 
 func (s *Server) createSession(c *gin.Context) {
@@ -190,11 +205,18 @@ func (s *Server) createSession(c *gin.Context) {
 	if req.Provider == "" {
 		req.Provider = s.defaultProvider
 	}
+	if req.WorkspaceID != "" {
+		if _, err := s.workspaces.Get(req.WorkspaceID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "workspace not found"})
+			return
+		}
+	}
 	sess := &session.Session{
-		ID:       uuid.New().String(),
-		Title:    req.Title,
-		Provider: req.Provider,
-		Model:    req.Model,
+		ID:          uuid.New().String(),
+		Title:       req.Title,
+		Provider:    req.Provider,
+		Model:       req.Model,
+		WorkspaceID: req.WorkspaceID,
 	}
 	if err := s.sessions.Create(sess); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -221,8 +243,9 @@ func (s *Server) deleteSession(c *gin.Context) {
 }
 
 type updateSessionRequest struct {
-	Title  *string `json:"title"`
-	Pinned *bool   `json:"pinned"`
+	Title       *string `json:"title"`
+	Pinned      *bool   `json:"pinned"`
+	WorkspaceID *string `json:"workspace_id"`
 }
 
 func (s *Server) updateSession(c *gin.Context) {
@@ -232,9 +255,16 @@ func (s *Server) updateSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Title == nil && req.Pinned == nil {
+	if req.Title == nil && req.Pinned == nil && req.WorkspaceID == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "nothing to update"})
 		return
+	}
+
+	if req.WorkspaceID != nil && *req.WorkspaceID != "" {
+		if _, err := s.workspaces.Get(*req.WorkspaceID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "workspace not found"})
+			return
+		}
 	}
 
 	sess, err := s.sessions.Patch(id, func(s *session.Session) error {
@@ -246,6 +276,9 @@ func (s *Server) updateSession(c *gin.Context) {
 		}
 		if req.Pinned != nil {
 			s.Pinned = *req.Pinned
+		}
+		if req.WorkspaceID != nil {
+			s.WorkspaceID = strings.TrimSpace(*req.WorkspaceID)
 		}
 		return nil
 	})
@@ -279,11 +312,21 @@ func (s *Server) chat(c *gin.Context) {
 	content := s.withAttachments(req.Content, req.AttachmentIDs)
 	imageParts := s.imageParts(req.AttachmentIDs)
 
+	// Resolve the session's workspace so the engine can scope file tools to it.
+	ws := s.workspaceFor(sess.WorkspaceID)
+	var workspacePath, workspaceID string
+	if ws != nil {
+		workspacePath = ws.Path
+		workspaceID = ws.ID
+	}
+
 	sess.Messages = append(sess.Messages, session.Message{
 		Role:    "user",
 		Content: content,
 		SentAt:  time.Now().UTC(),
 	})
+	// Persist the user message up front so it survives a cancellation.
+	_ = s.sessions.Update(sess)
 
 	pbMessages := make([]*pb.Message, 0, len(sess.Messages))
 	for i, m := range sess.Messages {
@@ -298,17 +341,37 @@ func (s *Server) chat(c *gin.Context) {
 	if req.WebSearch && !contains(toolNames, "web_search") {
 		toolNames = append(toolNames, "web_search")
 	}
+	// Enforce workspace-level tool permissions: when the workspace restricts the
+	// tool set, drop any requested tool that is not explicitly allowed.
+	if ws != nil && len(ws.Tools) > 0 {
+		toolNames = intersectTools(toolNames, ws.Tools)
+	}
 
-	ctx, cancel := contextWithTimeout(120)
-	defer cancel()
+	// Cancellable context: aborted when the client disconnects or when the
+	// user hits the stop button (which calls the cancel endpoint).
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	s.activeChats.Store(id, cancel)
+	defer func() {
+		s.activeChats.Delete(id)
+		cancel()
+	}()
+	ctx, timeoutCancel := context.WithTimeout(ctx, 120*time.Second)
+	defer timeoutCancel()
+
 	resp, err := s.engine.Chat(ctx, &pb.ChatRequest{
-		SessionId: id,
-		Messages:  pbMessages,
-		Provider:  sess.Provider,
-		Model:     sess.Model,
-		ToolNames: toolNames,
+		SessionId:   id,
+		Messages:    pbMessages,
+		Provider:    sess.Provider,
+		Model:       sess.Model,
+		ToolNames:   toolNames,
+		Workspace:   workspacePath,
+		WorkspaceId: workspaceID,
 	})
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			c.JSON(http.StatusOK, gin.H{"cancelled": true})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -322,6 +385,32 @@ func (s *Server) chat(c *gin.Context) {
 	}
 	_ = s.sessions.Update(sess)
 	c.JSON(http.StatusOK, resp)
+}
+
+// workspaceFor resolves a workspace id into its workspace record. An unknown or
+// empty id yields nil, in which case the engine falls back to the default
+// outputs directory and no tool restrictions apply.
+func (s *Server) workspaceFor(workspaceID string) *workspace.Workspace {
+	if workspaceID == "" {
+		return nil
+	}
+	ws, err := s.workspaces.Get(workspaceID)
+	if err != nil {
+		return nil
+	}
+	return ws
+}
+
+// intersectTools keeps the requested tools that are also present in the allowed
+// set, preserving the requested order.
+func intersectTools(requested, allowed []string) []string {
+	out := make([]string, 0, len(requested))
+	for _, t := range requested {
+		if contains(allowed, t) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func contains(items []string, target string) bool {
@@ -638,6 +727,104 @@ func looksText(data []byte) bool {
 		}
 	}
 	return true
+}
+
+// cancelChat stops an in-flight chat request for the given session. It is a
+// no-op when no request is currently running.
+func (s *Server) cancelChat(c *gin.Context) {
+	id := c.Param("id")
+	if v, ok := s.activeChats.Load(id); ok {
+		if cancel, ok := v.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"cancelled": true})
+}
+
+func (s *Server) listWorkspaces(c *gin.Context) {
+	workspaces, err := s.workspaces.List()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"workspaces": workspaces})
+}
+
+type createWorkspaceRequest struct {
+	Name  string   `json:"name"`
+	Path  string   `json:"path"`
+	Tools []string `json:"tools"`
+}
+
+func (s *Server) createWorkspace(c *gin.Context) {
+	var req createWorkspaceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	path := strings.TrimSpace(req.Path)
+	if path == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
+		return
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace path must be an existing directory"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	ws := &workspace.Workspace{
+		ID:    uuid.New().String(),
+		Name:  name,
+		Path:  path,
+		Tools: req.Tools,
+	}
+	if err := s.workspaces.Create(ws); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, ws)
+}
+
+func (s *Server) deleteWorkspace(c *gin.Context) {
+	if err := s.workspaces.Delete(c.Param("id")); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
+}
+
+// downloadWorkspaceFile serves files written by the write_file tool into a
+// workspace's outputs directory. The file name is restricted to a simple base
+// name to prevent directory traversal.
+func (s *Server) downloadWorkspaceFile(c *gin.Context) {
+	ws, err := s.workspaces.Get(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
+		return
+	}
+	name := c.Param("name")
+	name = filepath.Base(name)
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
+	}
+	if name == "" || name == "." || name == "/" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file name"})
+		return
+	}
+	path := filepath.Join(ws.Path, "outputs", name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+	contentType := http.DetectContentType(data)
+	c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
+	c.Data(http.StatusOK, contentType, data)
 }
 
 func contextWithTimeout(seconds ...int) (context.Context, context.CancelFunc) {

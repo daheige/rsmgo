@@ -36,6 +36,8 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - **多协议接入**：核心引擎同时暴露 gRPC（高效内部通信）与 HTTP/JSON（便于前端与第三方接入）双协议。
 - **多客户端**：提供命令行 CLI、Next.js Web 界面、Tauri 桌面客户端三种交互方式。
 - **控制面网关**：Go 控制面负责会话管理、路由转发、CORS 与前端代理，解耦引擎与 UI。
+- **停止生成**：在界面中停止进行中的对话——前端中止请求，并通知控制面取消引擎侧的生成。
+- **工作区**：在侧边栏添加并管理本地目录工作区，每个工作区可勾选允许使用的工具（工具级权限）。会话选择了工作区时，Agent 直接在该目录内读写（把它当作真正的工作目录），且仅能调用该工作区允许的工具；未设置工作区时，文件退回默认 `outputs/` 目录并提供下载链接。
 - **环境感知配置**：`app.yaml` 支持 `${VAR}` 环境变量展开与 `~` 主目录简写，便于不同环境部署。
 
 ---
@@ -82,12 +84,12 @@ graph TD
 
 2. **控制面（control，Go）**
    - 作为前端与引擎之间的网关，统一暴露 RESTful API（`/api/v1/*`）。
-   - 负责会话的 CRUD、消息转发、健康检查与跨域支持。
+   - 负责会话的 CRUD、工作区管理、会话取消、消息转发、健康检查与跨域支持。
    - 通过 gRPC 客户端与 Rust 引擎通信。
 
 3. **前端层**
-   - **Web**：基于 Next.js 16 + React 19 的聊天界面，通过 `next.config.js` 的 rewrites 将 `/api/*` 代理到控制面。
-   - **Desktop**：基于 Tauri 2 构建桌面壳，内嵌 Web 前端。
+   - **Web**：基于 Next.js 16 + React 19 的聊天界面，通过 `next.config.js` 的 rewrites 将 `/api/*` 代理到控制面。界面提供停止按钮以取消进行中的生成，以及侧边栏用于管理本地工作区目录。
+   - **Desktop**：基于 Tauri 2 构建桌面壳，内嵌同一套 Web 前端（构建时静态导出），因此自动继承所有 Web 功能。
 
 4. **CLI（rsmgo-cli，Rust）**
    - 直接链接 `rsmgo-core`，无需控制面即可运行交互式聊天或单次提问。
@@ -145,7 +147,8 @@ rsmgo/
 │       ├── api/               # HTTP API 与路由
 │       ├── config/            # Go 侧配置读取
 │       ├── engine/            # gRPC 引擎客户端
-│       └── session/           # 会话文件存储
+│       ├── session/           # 会话文件存储
+│       └── workspace/         # 工作区目录存储
 ├── pb/                        # 生成的 Go protobuf 代码
 ├── web/                       # Next.js Web 前端
 │   ├── app/                   # App Router 页面
@@ -334,7 +337,7 @@ pnpm install
 pnpm dev
 ```
 
-将通过 Tauri 打开本地窗口。如需打包安装程序，可运行 `pnpm tauri build`。
+将通过 Tauri 打开本地窗口。如需打包安装程序，可运行 `pnpm tauri build`——构建会静态导出 Web 前端（输出到 `web/out`），因此打包后的应用只需 Rust 引擎与 Go 控制面运行即可，它会直连 `http://localhost:9090` 控制面，无需 Web 开发服务器。
 
 ### 7. 使用 CLI（可选）
 
@@ -457,7 +460,7 @@ control_plane:
 | 工具名 | 说明 | 参数 |
 |--------|------|------|
 | `read_file` | 读取指定文件内容。 | `path`: 文件绝对或相对路径 |
-| `write_file` | 写入内容到工作区 `outputs/` 目录下的文件，自动创建父目录。 | `path`: `outputs/` 内的文件名或相对路径；`content`: 文件内容 |
+| `write_file` | 写入内容到文件，自动创建父目录。工作区内路径相对工作目录解析，否则相对 `outputs/`。 | `path`: 文件名或相对路径；`content`: 文件内容 |
 | `execute_command` | 执行 shell 命令并返回 stdout/stderr。 | `command`: 命令；`working_dir`（可选）: 工作目录 |
 | `list_directory` | 列出目录下的文件与子目录。 | `path`: 目录路径 |
 | `search` | 使用 `find` 按文件名模式递归搜索。 | `directory`: 搜索目录；`pattern`: 文件名模式，如 `*.rs` |
@@ -493,9 +496,12 @@ tools:
 
 ### 文件写入与下载
 
-`write_file` 工具会把文件保存到 `{data_dir}/outputs/` 目录，并返回下载链接。模型在最终回答中保留该链接后，前端会自动渲染“下载”按钮，用户可通过 `/api/v1/files/{filename}` 下载文件。
+`write_file` 的写入位置取决于会话是否选择了工作区：
 
-例如工具返回：
+- **未设置工作区（默认）**：文件写入 `{data_dir}/outputs/`，工具返回下载链接。模型在最终回答中保留该链接后，前端会自动渲染“下载”按钮，用户可通过 `/api/v1/files/{filename}` 下载文件。
+- **已选择工作区**：工作区目录即 Agent 的真正工作目录，文件直接写入该目录（例如 `notes/todo.md` 落到 `{workspace}/notes/todo.md`），不返回下载链接，直接从该目录读取即可。
+
+未设置工作区时，工具返回类似：
 
 ```text
 File written: outputs/my.md
@@ -504,8 +510,18 @@ Download: [下载 my.md](/api/v1/files/my.md)
 
 前端会显示一个绿色的“下载 my.md”按钮。
 
-- `write_file` 仅在 `{data_dir}/outputs/` 目录内写入文件。路径相对于该目录解析，任何包含 `..` 的路径都会被拒绝，以防止目录遍历。
+- `write_file` 仅在解析后的目录内写入（默认 `{data_dir}/outputs/`，或设置工作区后的工作区目录）。路径相对于该目录解析，任何包含 `..` 的路径都会被拒绝，以防止目录遍历。
 - `/api/v1/files/{filename}` 端点只提供 `{data_dir}/outputs/` 下的文件，并使用简单的 basename 查找，因此生成的文件无法逃逸出工作区。
+
+### 工作区
+
+工作区是 Agent 视为工作目录的本地目录，Agent 会直接在其中读写。通过侧边栏管理工作区：
+
+- **添加**：点击「添加」后通过系统原生目录选择器选择目录（桌面端），随后可调整名称并勾选该工作区允许 Agent 使用的工具（工具级权限；默认全部允许）。在普通浏览器中无法使用原生选择器，需手动填写路径。
+- **选择**：每个会话在聊天头部都有工作区选择器；新建会话会继承侧边栏当前选中的工作区。
+- **删除**：从侧边栏删除工作区（仅移除引用，不会删除目录或其文件）。
+
+当工作区生效时，Agent 会被告知其路径，相对路径会基于该目录解析，`write_file` 直接写入该目录（见 [文件写入与下载](#文件写入与下载)）。工作区勾选的工具会限制该会话中 Agent 可调用的工具；工具列表为空表示不限制。工作区以 JSON 文件形式存储在 `{data_dir}/workspaces/` 下。
 
 ### 安全提示
 
@@ -635,6 +651,7 @@ curl http://127.0.0.1:8080/api/v1/providers
 | `config` | 读取 `app.yaml` 并提取控制面所需字段。 |
 | `engine` | gRPC 客户端，封装与 Rust 引擎的通信。 |
 | `session` | 基于本地 JSON 文件的轻量会话存储。 |
+| `workspace` | 基于本地 JSON 文件的轻量工作区目录存储。 |
 
 ### pb / rsmgo-pb（生成的 protobuf 代码）
 
@@ -647,14 +664,14 @@ curl http://127.0.0.1:8080/api/v1/providers
 
 | 文件/目录 | 说明 |
 |-----------|------|
-| `app/page.tsx` | 主页面，会话侧边栏与当前聊天区。 |
-| `components/Chat.tsx` | 消息列表、输入框、附件上传与发送逻辑。助手消息以 Markdown 渲染，文件下载链接会显示为下载按钮。工具默认不启用，需通过工具菜单手动勾选。 |
+| `app/page.tsx` | 主页面，会话侧边栏、工作区管理与当前聊天区。 |
+| `components/Chat.tsx` | 消息列表、输入框、附件上传与发送/停止逻辑。助手消息以 Markdown 渲染，文件下载链接会显示为下载按钮。工具默认不启用，需通过工具菜单手动勾选。 |
 | `lib/api.ts` | 对控制面 `/api/v1/*` 接口的封装。 |
-| `next.config.js` | standalone 输出与 API 反向代理配置。 |
+| `next.config.js` | standalone / 静态导出输出与 API 反向代理配置。 |
 
 ### desktop（Tauri 桌面客户端）
 
-基于 Tauri 2 封装 Web 前端，提供本地窗口应用。构建命令：
+基于 Tauri 2 封装 Web 前端，提供本地窗口应用。`tauri build` 会静态导出 Web 前端（`web/out`）并嵌入原生二进制，应用直连 `http://localhost:9090` 控制面。构建命令：
 
 ```bash
 cd desktop

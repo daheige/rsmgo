@@ -1,5 +1,5 @@
 use crate::error::{Result, RsmgoError};
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolContext};
 use serde_json::json;
 use std::process::Command;
 
@@ -50,7 +50,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'query' argument".to_string()))?;
@@ -99,7 +99,7 @@ impl Tool for FetchUrlTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'url' argument".to_string()))?;

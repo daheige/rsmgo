@@ -100,6 +100,12 @@ pub struct ChatRequest {
     pub tool_names: Vec<String>,
     #[serde(default)]
     pub stream: bool,
+    /// Optional workspace directory path the agent should operate in.
+    #[serde(default)]
+    pub workspace: String,
+    /// Optional workspace id, used to build download links for generated files.
+    #[serde(default)]
+    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

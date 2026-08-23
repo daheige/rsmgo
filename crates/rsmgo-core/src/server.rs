@@ -124,6 +124,8 @@ fn map_chat_request(req: ProtoChatRequest) -> ChatRequest {
         model: req.model,
         tool_names: req.tool_names,
         stream: req.stream,
+        workspace: req.workspace,
+        workspace_id: req.workspace_id,
     }
 }
 

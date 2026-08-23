@@ -61,13 +61,17 @@ const normalizeFileLinks = (content: string): string => {
 
 const extractDownloads = (content: string): DownloadLink[] => {
   const links: DownloadLink[] = [];
-  const regex = /\[([^\]]+)\]\(\/api(?:\/v1)?\/files\/([^)]+)\)/g;
+  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const rawPath = match[2];
-    const cleanPath = rawPath.split(/[?#]/)[0];
-    const fileName = decodeURIComponent(cleanPath);
-    links.push({ name: fileName, url: `/api/v1/files/${encodeURIComponent(cleanPath)}` });
+  while ((match = linkRegex.exec(content)) !== null) {
+    const href = match[2].trim();
+    if (/^https?:\/\//i.test(href)) continue;
+    const isFile = /^\/api(?:\/v1)?\/files\//.test(href);
+    const isWorkspaceFile = /^\/api\/v1\/workspaces\/[^/]+\/files\//.test(href);
+    if (!isFile && !isWorkspaceFile) continue;
+    const cleanPath = href.split(/[?#]/)[0];
+    const fileName = decodeURIComponent(cleanPath.split("/").pop() || "");
+    links.push({ name: fileName, url: cleanPath });
   }
   return links;
 };
@@ -90,6 +94,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toolsInitialized = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -130,20 +135,40 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
     setError(null);
     const attachmentIds = attachments.map((a) => a.id);
     setAttachments([]);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const resp = await api.chat(sessionId, text, {
-        toolNames: enabledTools,
-        webSearch,
-        attachmentIds,
-      });
+      const resp = await api.chat(
+        sessionId,
+        text,
+        {
+          toolNames: enabledTools,
+          webSearch,
+          attachmentIds,
+        },
+        controller.signal,
+      );
       if (resp.message) {
         setMessages((prev) => [...prev, resp.message!]);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof DOMException && e.name === "AbortError") {
+        // User cancelled generation; do not surface as an error.
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
     }
+  };
+
+  // Abort the in-flight request and ask the control plane to cancel the
+  // engine-side chat so generation stops promptly.
+  const stop = () => {
+    if (!sessionId) return;
+    abortRef.current?.abort();
+    api.cancelChat(sessionId).catch(() => {});
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -201,11 +226,13 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
                       const isDownload =
                         typeof href === "string" &&
                         (href.startsWith("/api/v1/files/") ||
-                          href.startsWith("/api/files/"));
+                          href.startsWith("/api/files/") ||
+                          /^\/api\/v1\/workspaces\/[^/]+\/files\//.test(href));
                       let downloadName: string | undefined;
                       if (isDownload && typeof href === "string") {
                         const base = href
                           .replace(/^\/api(?:\/v1)?\/files\//, "")
+                          .replace(/^\/api\/v1\/workspaces\/[^/]+\/files\//, "")
                           .split(/[?#]/)[0];
                         downloadName = decodeURIComponent(base);
                       }
@@ -328,18 +355,34 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
             )}
           </div>
         </div>
-        <button
-          style={{
-            ...styles.button,
-            position: "absolute",
-            right: "0.75rem",
-            bottom: "0.75rem",
-          }}
-          onClick={send}
-          disabled={!sessionId || !canSend}
-        >
-          Send
-        </button>
+        {loading ? (
+          <button
+            style={{
+              ...styles.button,
+              ...styles.stopButton,
+              position: "absolute",
+              right: "0.75rem",
+              bottom: "0.75rem",
+            }}
+            onClick={stop}
+            title="Stop generation"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            style={{
+              ...styles.button,
+              position: "absolute",
+              right: "0.75rem",
+              bottom: "0.75rem",
+            }}
+            onClick={send}
+            disabled={!sessionId || !canSend}
+          >
+            Send
+          </button>
+        )}
       </div>
     </div>
   );
@@ -535,5 +578,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#fff",
     cursor: "pointer",
     height: "36px",
+  },
+  stopButton: {
+    background: "#dc2626",
   },
 };

@@ -5,8 +5,8 @@
   "identifier": "com.daheige.rsmgo",
   "build": {
     "devUrl": "http://localhost:1338",
-    "beforeBuildCommand": "cd ../web && pnpm build",
-    "frontendDist": "../dist"
+    "beforeBuildCommand": "cd ../web && pnpm build:desktop",
+    "frontendDist": "../../web/out"
   },
   "app": {
     "windows": [

@@ -11,14 +11,15 @@ import (
 )
 
 type Session struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	Pinned    bool      `json:"pinned"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Provider    string    `json:"provider"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Pinned      bool      `json:"pinned"`
+	WorkspaceID string    `json:"workspace_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Message struct {

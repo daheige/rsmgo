@@ -1,5 +1,5 @@
 use crate::error::{Result, RsmgoError};
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolContext};
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,11 +38,11 @@ impl Tool for ReadFileTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'path' argument".to_string()))?;
-        fs::read_to_string(path)
+        fs::read_to_string(ctx.resolve(path))
             .map_err(|e| RsmgoError::Tool(format!("failed to read file: {}", e)))
     }
 }
@@ -65,35 +65,53 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file under the workspace outputs directory, creating parent directories if needed."
+        "Write content to a file. In a workspace, the path is relative to the workspace directory; otherwise it is relative to the outputs directory. Parent directories are created automatically."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "File name or relative path inside outputs/" },
+                "path": { "type": "string", "description": "File name or relative path to write" },
                 "content": { "type": "string" }
             },
             "required": ["path", "content"]
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .or_else(|| args["file_path"].as_str())
             .ok_or_else(|| RsmgoError::Tool("missing 'path' argument".to_string()))?;
         let content = args["content"].as_str().unwrap_or("");
 
-        // Restrict writes to workspace/outputs so the control plane can serve
-        // them through a predictable download endpoint.
-        let outputs_dir = self.workspace_dir.join("outputs");
+        // In workspace mode the file is written directly into the workspace
+        // directory (the agent's true working directory). Without a workspace we
+        // write under the default outputs directory so the control plane can
+        // serve a download link.
+        let base_dir = ctx.workspace.as_ref().unwrap_or(&self.workspace_dir);
+        let write_dir = ctx.output_dir(&self.workspace_dir);
 
-        // Strip a leading slash from absolute paths so models can still pass
-        // them, but reject parent-directory references to prevent traversal.
-        let rel = Path::new(path);
-        let rel = rel.strip_prefix("/").unwrap_or(rel);
+        // Resolve the model-supplied path. Models often echo the workspace's
+        // full absolute path (e.g. /Users/.../mywork/server.js); re-base that
+        // onto the workspace so the file lands at the right place instead of
+        // nesting the absolute path inside the workspace. Relative paths are
+        // joined below as-is.
+        let p = Path::new(path);
+        let rel: PathBuf = if p.is_absolute() {
+            match &ctx.workspace {
+                Some(ws) => p
+                    .strip_prefix(ws)
+                    .map(|r| r.to_path_buf())
+                    .unwrap_or_else(|_| p.strip_prefix("/").unwrap_or(p).to_path_buf()),
+                None => p.strip_prefix("/").unwrap_or(p).to_path_buf(),
+            }
+        } else {
+            p.to_path_buf()
+        };
+
+        // Reject parent-directory references to prevent traversal.
         for component in rel.components() {
             if matches!(component, std::path::Component::ParentDir) {
                 return Err(RsmgoError::Tool(format!(
@@ -103,7 +121,7 @@ impl Tool for WriteFileTool {
             }
         }
 
-        let target = outputs_dir.join(rel);
+        let target = write_dir.join(rel);
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
@@ -113,19 +131,26 @@ impl Tool for WriteFileTool {
             .map_err(|e| RsmgoError::Tool(format!("failed to write file: {}", e)))?;
 
         let relative = target
-            .strip_prefix(&self.workspace_dir)
+            .strip_prefix(base_dir)
             .unwrap_or(&target)
             .to_string_lossy()
             .to_string();
-        let file_name = target
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path);
-        let encoded_name = percent_encode_filename(file_name);
-        Ok(format!(
-            "File written: {}\nDownload: [下载 {}](/api/v1/files/{})",
-            relative, file_name, encoded_name
-        ))
+
+        // A download link only makes sense when writing into the default
+        // outputs directory. In workspace mode the user reads the file directly
+        // from the workspace, so we just report the relative path.
+        match &ctx.workspace {
+            Some(_) => Ok(format!("File written: {}", relative)),
+            None => {
+                let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                let encoded_name = percent_encode_filename(file_name);
+                let download_link = format!("/api/v1/files/{}", encoded_name);
+                Ok(format!(
+                    "File written: {}\nDownload: [下载 {}]({})",
+                    relative, file_name, download_link
+                ))
+            }
+        }
     }
 }
 
@@ -151,13 +176,15 @@ impl Tool for ExecuteCommandTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'command' argument".to_string()))?;
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
         if let Some(dir) = args["working_dir"].as_str() {
+            cmd.current_dir(dir);
+        } else if let Some(dir) = &ctx.workspace {
             cmd.current_dir(dir);
         }
         let output = cmd
@@ -197,11 +224,11 @@ impl Tool for ListDirectoryTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'path' argument".to_string()))?;
-        let entries = fs::read_dir(path)
+        let entries = fs::read_dir(ctx.resolve(path))
             .map_err(|e| RsmgoError::Tool(format!("failed to read directory: {}", e)))?;
         let mut lines = Vec::new();
         for entry in entries {
@@ -214,7 +241,14 @@ impl Tool for ListDirectoryTool {
             };
             lines.push(format!("{} {}", typ, name));
         }
-        Ok(lines.join("\n"))
+        // Return an explicit marker for an empty directory. An empty string is a
+        // poor tool result: some providers then stop and merely describe what
+        // they plan to do next instead of continuing with the next tool call.
+        if lines.is_empty() {
+            Ok("(empty directory)".to_string())
+        } else {
+            Ok(lines.join("\n"))
+        }
     }
 }
 
@@ -240,7 +274,7 @@ impl Tool for SearchTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let directory = args["directory"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'directory' argument".to_string()))?;
@@ -248,7 +282,7 @@ impl Tool for SearchTool {
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'pattern' argument".to_string()))?;
         let output = Command::new("find")
-            .arg(directory)
+            .arg(ctx.resolve(directory))
             .arg("-name")
             .arg(pattern)
             .arg("-type")
@@ -265,11 +299,7 @@ mod tests {
     use std::fs;
 
     fn temp_workspace(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rsmgo-test-{}-{}",
-            label,
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("rsmgo-test-{}-{}", label, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -283,7 +313,7 @@ mod tests {
             "path": "../secret.txt",
             "content": "should not be written"
         });
-        let result = tool.execute(args);
+        let result = tool.execute(args, &ToolContext::default());
         assert!(result.is_err(), "path with .. should be rejected");
         assert!(!workspace.parent().unwrap().join("secret.txt").exists());
         let _ = fs::remove_dir_all(&workspace);
@@ -297,7 +327,7 @@ mod tests {
             "path": "reports/summary.md",
             "content": "hello"
         });
-        let result = tool.execute(args).unwrap();
+        let result = tool.execute(args, &ToolContext::default()).unwrap();
         assert!(result.contains("outputs/reports/summary.md"));
         assert!(result.contains("[下载 summary.md](/api/v1/files/summary.md)"));
         assert_eq!(
@@ -315,8 +345,61 @@ mod tests {
             "path": "my file.md",
             "content": "hello"
         });
-        let result = tool.execute(args).unwrap();
+        let result = tool.execute(args, &ToolContext::default()).unwrap();
         assert!(result.contains("[下载 my file.md](/api/v1/files/my%20file.md)"));
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn write_file_tool_writes_into_workspace() {
+        let data_dir = temp_workspace("ws-default");
+        let ws_dir = temp_workspace("ws-target");
+        let tool = WriteFileTool::new(&data_dir);
+        let ctx = ToolContext {
+            workspace: Some(ws_dir.clone()),
+            workspace_id: Some("ws-1".to_string()),
+        };
+        let args = json!({ "path": "notes/todo.md", "content": "buy milk" });
+        let result = tool.execute(args, &ctx).unwrap();
+        // In workspace mode the file lands directly in the workspace (not under
+        // outputs/) and no download link is emitted.
+        assert!(result.contains("File written: notes/todo.md"));
+        assert!(!result.contains("Download"));
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("notes/todo.md")).unwrap(),
+            "buy milk"
+        );
+        assert!(!data_dir.join("outputs/notes/todo.md").exists());
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&ws_dir);
+    }
+
+    #[test]
+    fn write_file_tool_rebases_absolute_path_into_workspace() {
+        let data_dir = temp_workspace("ws-abs-default");
+        let ws_dir = temp_workspace("ws-abs-target");
+        let tool = WriteFileTool::new(&data_dir);
+        let ctx = ToolContext {
+            workspace: Some(ws_dir.clone()),
+            workspace_id: Some("ws-1".to_string()),
+        };
+        // Models frequently echo the workspace's full absolute path back. The
+        // tool must strip the workspace prefix so the file lands at the right
+        // place instead of nesting the absolute path inside the workspace.
+        let args = json!({
+            "path": ws_dir.join("demo/server.js").to_string_lossy(),
+            "content": "console.log('hi')"
+        });
+        let result = tool.execute(args, &ctx).unwrap();
+        assert!(result.contains("File written: demo/server.js"));
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("demo/server.js")).unwrap(),
+            "console.log('hi')"
+        );
+        // The nested absolute path must NOT have been created.
+        let nested = ws_dir.join(ws_dir.strip_prefix("/").unwrap_or(&ws_dir)).join("demo/server.js");
+        assert!(!nested.exists());
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&ws_dir);
     }
 }

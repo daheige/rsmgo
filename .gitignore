@@ -51,6 +51,7 @@ rgo-control
 
 # Next.js build output
 web/.next/
+web/out/
 *.tsbuildinfo
 
 # Tauri build output

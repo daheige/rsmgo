@@ -109,6 +109,8 @@ async fn main() -> Result<()> {
                     model: model.clone(),
                     tool_names: vec![],
                     stream: false,
+                    workspace: String::new(),
+                    workspace_id: String::new(),
                 };
 
                 match agent.chat(request).await {
@@ -138,6 +140,8 @@ async fn main() -> Result<()> {
                 model,
                 tool_names: vec![],
                 stream: false,
+                workspace: String::new(),
+                workspace_id: String::new(),
             };
             let resp = agent.chat(request).await?;
             println!("{}", resp.message.content);

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 1338",
     "build": "next build",
+    "build:desktop": "NEXT_STATIC_EXPORT=1 NEXT_PUBLIC_RSMGO_CONTROL_URL=http://localhost:9090 next build",
     "start": "next start",
     "lint": "next lint",
     "format": "prettier --write ."

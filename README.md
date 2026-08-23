@@ -35,6 +35,8 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - **Multi-protocol access**: The core engine exposes both gRPC (efficient internal communication) and HTTP/JSON (easy for frontends and third parties).
 - **Multiple clients**: Command-line CLI, Next.js web UI, and Tauri desktop client.
 - **Control-plane gateway**: The Go control plane handles session management, routing, CORS, and frontend proxying, decoupling the engine from the UI.
+- **Stop generation**: Stop an in-flight chat from the UI — the frontend aborts the request and asks the control plane to cancel the engine-side generation.
+- **Workspaces**: Add and manage local directory workspaces from the sidebar, each with a per-tool permission list. When a session selects a workspace, the agent reads and writes directly inside that directory (its true working directory) and is restricted to the workspace's allowed tools; without a workspace, files fall back to the default `outputs/` directory with a download link.
 - **Environment-aware configuration**: `app.yaml` supports `${VAR}` environment variable expansion and `~` home-directory shorthand for flexible deployment.
 
 ---
@@ -81,12 +83,12 @@ graph TD
 
 2. **Control plane (`control`, Go)**
    - Acts as a gateway between frontends and the engine, exposing a unified RESTful API under `/api/v1/*`.
-   - Responsible for session CRUD, message forwarding, health checks, and CORS.
+   - Responsible for session CRUD, workspace management, chat cancellation, message forwarding, health checks, and CORS.
    - Communicates with the Rust engine through a gRPC client.
 
 3. **Frontend layer**
-   - **Web**: Chat interface built with Next.js 16 and React 19. `next.config.js` rewrites `/api/*` to the control plane.
-   - **Desktop**: Tauri 2 shell embedding the web frontend.
+   - **Web**: Chat interface built with Next.js 16 and React 19. `next.config.js` rewrites `/api/*` to the control plane. The UI offers a stop button to cancel in-flight generation and a sidebar for managing local workspace directories.
+   - **Desktop**: Tauri 2 shell embedding the same web frontend (statically exported at build time), so it inherits every web feature.
 
 4. **CLI (`rsmgo-cli`, Rust)**
    - Links directly against `rsmgo-core` and can run interactive or one-shot chats without the control plane.
@@ -144,7 +146,8 @@ rsmgo/
 │       ├── api/               # HTTP API and routing
 │       ├── config/            # Go-side configuration loading
 │       ├── engine/            # gRPC engine client
-│       └── session/           # Session file storage
+│       ├── session/           # Session file storage
+│       └── workspace/         # Workspace directory storage
 ├── pb/                        # Generated Go protobuf code
 ├── web/                       # Next.js web frontend
 │   ├── app/                   # App Router pages
@@ -324,7 +327,7 @@ pnpm install
 pnpm dev
 ```
 
-A native window opens via Tauri. To build an installer instead, run `pnpm tauri build`.
+A native window opens via Tauri. To build an installer instead, run `pnpm tauri build` — the build statically exports the web frontend (into `web/out`), so the packaged app only needs the Rust engine and Go control plane running; it talks to the control plane directly at `http://localhost:9090` and does not need the web dev server.
 
 ### 7. Use the CLI (optional)
 
@@ -443,7 +446,7 @@ Tools require two steps to become active:
 | Tool name | Description | Parameters |
 |-----------|-------------|------------|
 | `read_file` | Read the contents of a file. | `path`: absolute or relative file path |
-| `write_file` | Write content to a file under the workspace `outputs/` directory, creating parent directories if needed. | `path`: file name or relative path inside `outputs/`; `content`: file content |
+| `write_file` | Write content to a file, creating parent directories if needed. In a workspace the path is relative to the workspace directory; otherwise it is relative to `outputs/`. | `path`: file name or relative path; `content`: file content |
 | `execute_command` | Execute a shell command and return stdout/stderr. | `command`: shell command; `working_dir` (optional): working directory |
 | `list_directory` | List files and subdirectories at a path. | `path`: directory path |
 | `search` | Recursively search for files by name pattern using `find`. | `directory`: search directory; `pattern`: filename pattern, e.g. `*.rs` |
@@ -479,9 +482,12 @@ The tool result is returned to the model, which then generates the final natural
 
 ### File writes and downloads
 
-The `write_file` tool saves files to `{data_dir}/outputs/` and returns a Markdown download link. When the model preserves that link in its final response, the frontend automatically renders a "Download" button, and the file is served at `/api/v1/files/{filename}`.
+Where `write_file` writes depends on whether the session has a workspace selected:
 
-For example, the tool result looks like:
+- **No workspace (default)**: files are written under `{data_dir}/outputs/` and the tool returns a Markdown download link. When the model preserves that link in its final response, the frontend renders a "Download" button served at `/api/v1/files/{filename}`.
+- **Workspace selected**: the workspace directory is the agent's true working directory, so files are written directly into it (e.g. `notes/todo.md` lands at `{workspace}/notes/todo.md`) and no download link is emitted — you read the file directly from that directory.
+
+For example, without a workspace the tool result looks like:
 
 ```text
 File written: outputs/my.md
@@ -490,8 +496,18 @@ Download: [下载 my.md](/api/v1/files/my.md)
 
 The frontend will show a green "下载 my.md" button.
 
-- `write_file` only writes inside `{data_dir}/outputs/`. Paths are interpreted relative to that directory, and any path containing `..` is rejected to prevent directory traversal.
+- `write_file` only writes inside the resolved directory (`{data_dir}/outputs/`, or the workspace directory when one is set). Paths are interpreted relative to that directory, and any path containing `..` is rejected to prevent directory traversal.
 - The `/api/v1/files/{filename}` endpoint only serves files from `{data_dir}/outputs/` and uses a simple base-name lookup, so generated files cannot escape the workspace.
+
+### Workspaces
+
+A workspace is a local directory the agent treats as its working directory — it reads and writes directly inside it. Manage workspaces from the sidebar:
+
+- **Add**: click **添加** to pick a directory through the native directory picker (desktop), then optionally adjust the name and check which tools the agent may use in that workspace (per-tool permissions; all tools are enabled by default). In a plain browser the picker is unavailable, so the path is entered manually.
+- **Select**: each session has a workspace selector in the chat header; new sessions inherit the currently selected sidebar workspace.
+- **Remove**: delete a workspace from the sidebar (this only removes the reference, never the directory or its files).
+
+When a workspace is active, the agent is told its path, relative file paths are resolved against it, and `write_file` writes directly into it (see [File writes and downloads](#file-writes-and-downloads)). The workspace's checked tools restrict which tools the agent may call in that session; an empty tool list means no restriction. Workspaces are stored as JSON files under `{data_dir}/workspaces/`.
 
 ### Safety notes
 
@@ -562,6 +578,7 @@ See the [Tool Usage](#tool-usage) section for the full list of built-in tools, t
 | `config` | Reads `app.yaml` and extracts control-plane-specific fields. |
 | `engine` | gRPC client wrapper for communicating with the Rust engine. |
 | `session` | Lightweight local JSON file store for sessions. |
+| `workspace` | Lightweight local JSON file store for workspace directories. |
 
 ### pb / rsmgo-pb (generated protobuf code)
 
@@ -574,14 +591,14 @@ See the [Tool Usage](#tool-usage) section for the full list of built-in tools, t
 
 | File/Directory | Description |
 |----------------|-------------|
-| `app/page.tsx` | Main page with session sidebar and active chat area. |
-| `components/Chat.tsx` | Message list, input box, attachment upload, and send logic. Assistant messages are rendered as Markdown and file download links are surfaced as download buttons. Tools are disabled by default and must be enabled via the tool menu. |
+| `app/page.tsx` | Main page with session sidebar, workspace management, and active chat area. |
+| `components/Chat.tsx` | Message list, input box, attachment upload, send/stop logic, and download links. Assistant messages are rendered as Markdown and file download links are surfaced as download buttons. Tools are disabled by default and must be enabled via the tool menu. |
 | `lib/api.ts` | Client wrapper for control-plane `/api/v1/*` endpoints. |
-| `next.config.js` | Standalone output and API reverse-proxy configuration. |
+| `next.config.js` | Standalone/static-export output and API reverse-proxy configuration. |
 
 ### desktop (Tauri desktop client)
 
-Desktop shell based on Tauri 2 wrapping the web frontend. Build with:
+Desktop shell based on Tauri 2 wrapping the web frontend. `tauri build` statically exports the web frontend (`web/out`) and embeds it in the native binary; the app talks to the control plane at `http://localhost:9090` directly. Build with:
 
 ```bash
 cd desktop

@@ -305,6 +305,8 @@ type ChatRequest struct {
 	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
 	ToolNames     []string               `protobuf:"bytes,5,rep,name=tool_names,json=toolNames,proto3" json:"tool_names,omitempty"`
 	Stream        bool                   `protobuf:"varint,6,opt,name=stream,proto3" json:"stream,omitempty"`
+	Workspace     string                 `protobuf:"bytes,7,opt,name=workspace,proto3" json:"workspace,omitempty"`                        // optional workspace directory path
+	WorkspaceId   string                 `protobuf:"bytes,8,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"` // optional workspace id
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -379,6 +381,20 @@ func (x *ChatRequest) GetStream() bool {
 		return x.Stream
 	}
 	return false
+}
+
+func (x *ChatRequest) GetWorkspace() string {
+	if x != nil {
+		return x.Workspace
+	}
+	return ""
+}
+
+func (x *ChatRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
 }
 
 type ChatResponse struct {
@@ -1008,7 +1024,7 @@ const file_rsmgo_proto_rawDesc = "" +
 	"\bToolCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
-	"\targuments\x18\x03 \x01(\tR\targuments\"\xc4\x01\n" +
+	"\targuments\x18\x03 \x01(\tR\targuments\"\x85\x02\n" +
 	"\vChatRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12-\n" +
@@ -1017,7 +1033,9 @@ const file_rsmgo_proto_rawDesc = "" +
 	"\x05model\x18\x04 \x01(\tR\x05model\x12\x1d\n" +
 	"\n" +
 	"tool_names\x18\x05 \x03(\tR\ttoolNames\x12\x16\n" +
-	"\x06stream\x18\x06 \x01(\bR\x06stream\"\xb4\x01\n" +
+	"\x06stream\x18\x06 \x01(\bR\x06stream\x12\x1c\n" +
+	"\tworkspace\x18\a \x01(\tR\tworkspace\x12!\n" +
+	"\fworkspace_id\x18\b \x01(\tR\vworkspaceId\"\xb4\x01\n" +
 	"\fChatResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12+\n" +

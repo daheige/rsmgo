@@ -56,6 +56,8 @@ message ChatRequest {
   string model = 4;
   repeated string tool_names = 5;
   bool stream = 6;
+  string workspace = 7;     // optional workspace directory path
+  string workspace_id = 8;  // optional workspace id
 }
 
 message ChatResponse {

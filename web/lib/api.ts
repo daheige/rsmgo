@@ -5,8 +5,17 @@ export interface Session {
   model: string;
   messages: Message[];
   pinned?: boolean;
+  workspace_id?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  path: string;
+  tools?: string[];
+  created_at: string;
 }
 
 export interface Message {
@@ -34,12 +43,18 @@ export interface ChatOptions {
   attachmentIds?: string[];
 }
 
-// In development, talk directly to the control plane to avoid Next.js dev
-// proxy timeout/ECONNRESET issues on long chat requests. In production the
-// app is served standalone and requests stay same-origin.
+// Resolve the control-plane base URL.
+//
+// - Desktop (Tauri) static build: no Node server runs inside the WebView, so the
+//   build injects NEXT_PUBLIC_RSMGO_CONTROL_URL to point at the control plane.
+// - Web development: talk to the control plane directly to avoid Next.js dev
+//   proxy timeout/ECONNRESET issues on long chat requests.
+// - Web production: served standalone and requests stay same-origin via rewrites.
 function baseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_RSMGO_CONTROL_URL;
+  if (configured) return configured;
   if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
-    return process.env.NEXT_PUBLIC_RSMGO_CONTROL_URL || "http://localhost:9090";
+    return "http://localhost:9090";
   }
   return "";
 }
@@ -61,7 +76,12 @@ export async function listSessions(): Promise<Session[]> {
   return data.sessions ?? [];
 }
 
-export async function createSession(payload: { title: string; provider: string; model: string }): Promise<Session> {
+export async function createSession(payload: {
+  title: string;
+  provider: string;
+  model: string;
+  workspace_id?: string;
+}): Promise<Session> {
   return fetchJSON<Session>("/api/v1/sessions", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -74,7 +94,7 @@ export async function getSession(id: string): Promise<Session> {
 
 export async function updateSession(
   id: string,
-  patch: { title?: string; pinned?: boolean },
+  patch: { title?: string; pinned?: boolean; workspace_id?: string },
 ): Promise<Session> {
   return fetchJSON<Session>(`/api/v1/sessions/${id}`, {
     method: "PATCH",
@@ -92,6 +112,7 @@ export async function chat(
   id: string,
   content: string,
   opts: ChatOptions = {},
+  signal?: AbortSignal,
 ): Promise<{ message?: Message }> {
   return fetchJSON<{ message?: Message }>(`/api/v1/sessions/${id}/chat`, {
     method: "POST",
@@ -101,7 +122,57 @@ export async function chat(
       web_search: opts.webSearch ?? false,
       attachment_ids: opts.attachmentIds ?? [],
     }),
+    signal,
   });
+}
+
+export async function cancelChat(id: string): Promise<void> {
+  await fetchJSON<{ cancelled: boolean }>(`/api/v1/sessions/${id}/chat/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function listWorkspaces(): Promise<Workspace[]> {
+  const data = await fetchJSON<{ workspaces: Workspace[] }>("/api/v1/workspaces");
+  return data.workspaces ?? [];
+}
+
+export async function createWorkspace(payload: {
+  name: string;
+  path: string;
+  tools?: string[];
+}): Promise<Workspace> {
+  return fetchJSON<Workspace>("/api/v1/workspaces", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteWorkspace(id: string): Promise<void> {
+  await fetchJSON<{ deleted: boolean }>(`/api/v1/workspaces/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// Whether the app is running inside the Tauri desktop WebView, where the native
+// directory picker is available.
+export function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+// Open a native directory picker (Tauri desktop only) and return the selected
+// directory's absolute path. Returns null when running in a plain browser (no
+// native picker) or when the user cancels the dialog.
+export async function pickDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: {
+      invoke: (cmd: string, args?: unknown) => Promise<unknown>;
+    };
+  };
+  if (!w.__TAURI_INTERNALS__?.invoke) return null;
+  const result = await w.__TAURI_INTERNALS__.invoke("pick_directory");
+  return typeof result === "string" && result ? result : null;
 }
 
 export async function uploadFile(file: File): Promise<Attachment> {

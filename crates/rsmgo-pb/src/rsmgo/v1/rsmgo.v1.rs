@@ -61,6 +61,12 @@ pub struct ChatRequest {
     pub tool_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(bool, tag = "6")]
     pub stream: bool,
+    /// optional workspace directory path
+    #[prost(string, tag = "7")]
+    pub workspace: ::prost::alloc::string::String,
+    /// optional workspace id
+    #[prost(string, tag = "8")]
+    pub workspace_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChatResponse {
