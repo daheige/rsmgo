@@ -10,6 +10,8 @@ import (
 )
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
@@ -24,7 +26,8 @@ func main() {
 	sessionStore := session.NewStore(cfg.DataDir)
 
 	server := api.NewServer(engineClient, sessionStore, cfg.Providers, cfg.DataDir)
-	log.Printf("rsmgo control plane listening on %s", cfg.Addr)
+	log.Printf("rsmgo control plane listening on %s (engine=%s data_dir=%s providers=%d)",
+		cfg.Addr, cfg.EngineAddr, cfg.DataDir, len(cfg.Providers))
 	if err := server.Run(cfg.Addr); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,6 +52,7 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(corsMiddleware())
+	r.Use(requestLogger())
 
 	defaultProvider := "openai"
 	if len(providers) > 0 {
@@ -126,6 +128,22 @@ func corsMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+// requestLogger logs each HTTP request: client IP, method, path, status code,
+// and latency. /health is skipped to keep polling noise out of the log.
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.URL.Path == "/health" {
+			c.Next()
+			return
+		}
+		start := time.Now()
+		c.Next()
+		log.Printf("%s %s %s -> %d (%s)\n",
+			c.ClientIP(), c.Request.Method, c.Request.URL.Path,
+			c.Writer.Status(), time.Since(start).Round(time.Millisecond))
 	}
 }
 
@@ -223,6 +241,7 @@ func (s *Server) createSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	log.Printf("session created id=%s provider=%s model=%q", sess.ID, sess.Provider, sess.Model)
 	c.JSON(http.StatusCreated, sess)
 }
 
@@ -236,10 +255,12 @@ func (s *Server) getSession(c *gin.Context) {
 }
 
 func (s *Server) deleteSession(c *gin.Context) {
-	if err := s.sessions.Delete(c.Param("id")); err != nil {
+	id := c.Param("id")
+	if err := s.sessions.Delete(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	log.Printf("session deleted id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
@@ -348,6 +369,10 @@ func (s *Server) chat(c *gin.Context) {
 		toolNames = intersectTools(toolNames, ws.Tools)
 	}
 
+	log.Printf("chat start session=%s provider=%s model=%q workspace=%q tools=%v",
+		id, sess.Provider, sess.Model, workspaceID, toolNames)
+	started := time.Now()
+
 	// Cancellable context: aborted when the client disconnects or when the
 	// user hits the stop button (which calls the cancel endpoint).
 	ctx, cancel := context.WithCancel(c.Request.Context())
@@ -370,9 +395,11 @@ func (s *Server) chat(c *gin.Context) {
 	})
 	if err != nil {
 		if ctx.Err() == context.Canceled {
+			log.Printf("chat cancelled session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
 			c.JSON(http.StatusOK, gin.H{"cancelled": true})
 			return
 		}
+		log.Printf("chat failed session=%s: %v", id, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -385,6 +412,7 @@ func (s *Server) chat(c *gin.Context) {
 		})
 	}
 	_ = s.sessions.Update(sess)
+	log.Printf("chat done session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -466,6 +494,7 @@ func (s *Server) uploadFile(c *gin.Context) {
 		return
 	}
 
+	log.Printf("upload id=%s name=%q size=%d type=%s", id, meta.Name, meta.Size, meta.ContentType)
 	c.JSON(http.StatusCreated, gin.H{
 		"id":           id,
 		"name":         meta.Name,
@@ -736,6 +765,7 @@ func (s *Server) cancelChat(c *gin.Context) {
 	id := c.Param("id")
 	if v, ok := s.activeChats.Load(id); ok {
 		if cancel, ok := v.(context.CancelFunc); ok {
+			log.Printf("chat cancel requested session=%s", id)
 			cancel()
 		}
 	}
@@ -788,14 +818,17 @@ func (s *Server) createWorkspace(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	log.Printf("workspace created id=%s name=%q path=%q tools=%v", ws.ID, ws.Name, ws.Path, ws.Tools)
 	c.JSON(http.StatusCreated, ws)
 }
 
 func (s *Server) deleteWorkspace(c *gin.Context) {
-	if err := s.workspaces.Delete(c.Param("id")); err != nil {
+	id := c.Param("id")
+	if err := s.workspaces.Delete(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	log.Printf("workspace deleted id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
