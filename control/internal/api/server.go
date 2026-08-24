@@ -316,6 +316,7 @@ type chatRequest struct {
 	ToolNames     []string `json:"tool_names"`
 	WebSearch     bool     `json:"web_search"`
 	AttachmentIDs []string `json:"attachment_ids"`
+	Regenerate    bool     `json:"regenerate"`
 }
 
 func (s *Server) chat(c *gin.Context) {
@@ -342,11 +343,19 @@ func (s *Server) chat(c *gin.Context) {
 		workspaceID = ws.ID
 	}
 
-	sess.Messages = append(sess.Messages, session.Message{
-		Role:    "user",
-		Content: content,
-		SentAt:  time.Now().UTC(),
-	})
+	if req.Regenerate {
+		// Regenerate: drop any trailing assistant message(s) so the model
+		// re-answers the last user prompt instead of appending a new one.
+		for len(sess.Messages) > 0 && sess.Messages[len(sess.Messages)-1].Role == "assistant" {
+			sess.Messages = sess.Messages[:len(sess.Messages)-1]
+		}
+	} else {
+		sess.Messages = append(sess.Messages, session.Message{
+			Role:    "user",
+			Content: content,
+			SentAt:  time.Now().UTC(),
+		})
+	}
 	// Persist the user message up front so it survives a cancellation.
 	_ = s.sessions.Update(sess)
 

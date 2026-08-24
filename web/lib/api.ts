@@ -41,6 +41,7 @@ export interface ChatOptions {
   toolNames?: string[];
   webSearch?: boolean;
   attachmentIds?: string[];
+  regenerate?: boolean;
 }
 
 // Resolve the control-plane base URL.
@@ -121,6 +122,7 @@ export async function chat(
       tool_names: opts.toolNames ?? [],
       web_search: opts.webSearch ?? false,
       attachment_ids: opts.attachmentIds ?? [],
+      regenerate: opts.regenerate ?? false,
     }),
     signal,
   });

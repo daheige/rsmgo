@@ -76,6 +76,27 @@ const extractDownloads = (content: string): DownloadLink[] => {
   return links;
 };
 
+const CopyIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const CheckIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+const RetryIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
+
 interface ChatProps {
   sessionId?: string;
   tools?: api.ToolInfo[];
@@ -90,6 +111,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   const [enabledTools, setEnabledTools] = useState<string[]>([]);
   const [webSearch, setWebSearch] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -124,30 +146,14 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
   const canSend = !loading && (input.trim().length > 0 || attachments.length > 0);
 
-  const send = async () => {
-    if (!sessionId || !canSend) return;
-    const text = input.trim();
-    const display = text || attachments.map((a) => `[${a.name}]`).join(" ");
-    const userMsg: api.Message = { role: "user", content: display };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
+  const submitChat = async (content: string, opts: api.ChatOptions) => {
+    if (!sessionId) return;
     setLoading(true);
     setError(null);
-    const attachmentIds = attachments.map((a) => a.id);
-    setAttachments([]);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const resp = await api.chat(
-        sessionId,
-        text,
-        {
-          toolNames: enabledTools,
-          webSearch,
-          attachmentIds,
-        },
-        controller.signal,
-      );
+      const resp = await api.chat(sessionId, content, opts, controller.signal);
       if (resp.message) {
         setMessages((prev) => [...prev, resp.message!]);
       }
@@ -160,6 +166,55 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
+    }
+  };
+
+  const send = async () => {
+    if (!sessionId || !canSend) return;
+    const text = input.trim();
+    const display = text || attachments.map((a) => `[${a.name}]`).join(" ");
+    const userMsg: api.Message = { role: "user", content: display };
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    const attachmentIds = attachments.map((a) => a.id);
+    setAttachments([]);
+    await submitChat(text, { toolNames: enabledTools, webSearch, attachmentIds });
+  };
+
+  const retry = async (assistantIndex: number) => {
+    if (!sessionId || loading) return;
+    const userContent = messages
+      .slice(0, assistantIndex)
+      .filter((m) => m.role === "user")
+      .pop()?.content;
+    if (!userContent) return;
+    // Drop the assistant message being retried (and anything after it) so the
+    // new response replaces it in place.
+    setMessages((prev) => prev.slice(0, assistantIndex));
+    await submitChat(userContent, { toolNames: enabledTools, webSearch, regenerate: true });
+  };
+
+  const copyMessage = async (m: api.Message, index: number) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(m.content);
+      } else {
+        // Fallback for non-secure contexts (e.g. the Tauri file:// origin).
+        const ta = document.createElement("textarea");
+        ta.value = m.content;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopiedIndex(index);
+      window.setTimeout(() => {
+        setCopiedIndex((cur) => (cur === index ? null : cur));
+      }, 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -258,6 +313,29 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
                       ⬇ Download {d.name}
                     </a>
                   ))}
+                </div>
+              )}
+              {m.role === "assistant" && (
+                <div className="msg-actions">
+                  <button
+                    className="msg-action"
+                    onClick={() => copyMessage(m, i)}
+                    title={copiedIndex === i ? "Copied" : "Copy"}
+                    aria-label="Copy"
+                  >
+                    {copiedIndex === i ? <CheckIcon /> : <CopyIcon />}
+                  </button>
+                  {i === messages.length - 1 && (
+                    <button
+                      className="msg-action"
+                      onClick={() => retry(i)}
+                      title="Retry"
+                      aria-label="Retry"
+                      disabled={loading}
+                    >
+                      <RetryIcon />
+                    </button>
+                  )}
                 </div>
               )}
             </div>
