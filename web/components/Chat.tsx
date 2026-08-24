@@ -408,7 +408,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
   },
   message: {
-    maxWidth: "80%",
+    maxWidth: "100%",
     padding: "0.75rem 1rem",
     borderRadius: "0.5rem",
     wordBreak: "break-word",
@@ -491,7 +491,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   input: {
     width: "100%",
-    minWidth: "1068px",
+    minWidth: "0",
     maxWidth: "100%",
     minHeight: "200px",
     padding: "0.75rem 1rem 3.75rem 1rem",

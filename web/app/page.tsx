@@ -386,9 +386,8 @@ const styles: Record<string, React.CSSProperties> = {
   layout: {
     display: "flex",
     height: "100vh",
+    width: "100%",
     minWidth: "1600px",
-    maxWidth: "3300px",
-    margin: "0 auto",
   },
   sidebar: {
     width: "280px",
