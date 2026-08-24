@@ -36,6 +36,7 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - **Multiple clients**: Command-line CLI, Next.js web UI, and Tauri desktop client.
 - **Control-plane gateway**: The Go control plane handles session management, routing, CORS, and frontend proxying, decoupling the engine from the UI.
 - **Stop generation**: Stop an in-flight chat from the UI — the frontend aborts the request and asks the control plane to cancel the engine-side generation.
+- **Rich rendering & message actions**: Assistant replies are rendered as Markdown with per-language syntax-highlighted code blocks and one-click copy; each assistant message has a copy button, and the last message offers a regenerate button to re-run the previous answer in place.
 - **Workspaces**: Add and manage local directory workspaces from the sidebar, each with a per-tool permission list. When a session selects a workspace, the agent reads and writes directly inside that directory (its true working directory) and is restricted to the workspace's allowed tools; without a workspace, files fall back to the default `outputs/` directory with a download link.
 - **Environment-aware configuration**: `app.yaml` supports `${VAR}` environment variable expansion and `~` home-directory shorthand for flexible deployment.
 
@@ -622,7 +623,7 @@ See the [Tool Usage](#tool-usage) section for the full list of built-in tools, t
 | File/Directory | Description |
 |----------------|-------------|
 | `app/page.tsx` | Main page with session sidebar, workspace management, and active chat area. |
-| `components/Chat.tsx` | Message list, input box, attachment upload, send/stop logic, and download links. Assistant messages are rendered as Markdown and file download links are surfaced as download buttons. Tools are disabled by default and must be enabled via the tool menu. |
+| `components/Chat.tsx` | Message list, input box, attachment upload, and send/stop logic. Assistant messages are rendered as Markdown with syntax-highlighted code blocks and per-block copy buttons; file download links are surfaced as download buttons. Each assistant message has a copy button and the last message can be regenerated. Tools are disabled by default and must be enabled via the tool menu. |
 | `lib/api.ts` | Client wrapper for control-plane `/api/v1/*` endpoints. |
 | `next.config.js` | Standalone/static-export output and API reverse-proxy configuration. |
 
