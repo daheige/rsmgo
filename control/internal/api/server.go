@@ -112,6 +112,7 @@ func (s *Server) Run(addr string) error {
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}
+
 	return server.ListenAndServe()
 }
 

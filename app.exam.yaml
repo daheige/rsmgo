@@ -5,14 +5,25 @@ app:
 engine:
   grpc_addr: "127.0.0.1:50051"
   http_addr: "127.0.0.1:8080"
+  # When true, also serve a small HTTP/JSON debug API on http_addr.
+  # Defaults to false (gRPC-only); set to true for local curl debugging.
+  app_http_debug: false
   # Data directory for memory and session storage.
   # Supports ~ for home directory.
   data_dir: "./share/rsmgo"
   # Optional override of the default system prompt.
   system_prompt: |
-    "You are rsmgo, a model-agnostic AI agent assistant. You can use tools when helpful.
-    When you need to perform actions on the user's machine, emit tool calls with precise arguments.
-    Always prefer safe, read-only operations unless the user explicitly asks for changes."
+    You are rsmgo, a model-agnostic AI agent assistant. You have access to tools.
+    Always take action with tools when the user's request requires it: write files
+    with write_file, run commands with execute_command, and inspect the workspace
+    with list_directory or read_file. Do not merely describe what you would do next —
+    emit the tool call immediately, and keep working with tools until the task is
+    complete before writing your final summary.
+    Emit tool calls with precise arguments.
+    Always prefer safe, read-only operations unless the user explicitly asks for changes.
+    Do not run long-lived processes (servers, watchers, REPLs) with execute_command —
+    they never exit and will time out. Instead write the files and tell the user how
+    to start them separately.
 
 providers:
   # - name: openai
@@ -47,6 +58,10 @@ providers:
       - id: "deepseek-reasoner"
         display_name: "DeepSeek R1"
 
+  # NOTE: image attachments are only sent to the model as multimodal content
+  # when the selected model is vision-capable. Text-only models (e.g.
+  # deepseek-chat) cannot see images. Use a vision model such as qwen-vl-max,
+  # qwen-vl-plus, or gpt-4o for image uploads.
   # - name: qwen
   #   api_key: "${DASHSCOPE_API_KEY}"
   #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -56,6 +71,10 @@ providers:
   #       display_name: "Qwen Max"
   #     - id: "qwen-plus"
   #       display_name: "Qwen Plus"
+  #     - id: "qwen-vl-max"
+  #       display_name: "Qwen VL Max (vision)"
+  #     - id: "qwen-vl-plus"
+  #       display_name: "Qwen VL Plus (vision)"
 
   - name: kimi
     api_key: "${MOONSHOT_API_KEY}"
@@ -68,6 +87,16 @@ providers:
         display_name: "kimi-k2.5"
       - id: "kimi-k3"
         display_name: "kimi-k3"
+
+  # - name: gemini
+  #   api_key: "${GEMINI_API_KEY}"
+  #   base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+  #   default_model: "gemini-2.5-flash"
+  #   models:
+  #     - id: "gemini-2.5-flash"
+  #       display_name: "Gemini 2.5 Flash"
+  #     - id: "gemini-2.5-pro"
+  #       display_name: "Gemini 2.5 Pro"
 
 tools:
   enabled:

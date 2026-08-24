@@ -341,6 +341,21 @@ Or run a single prompt:
 cargo run -p rsmgo-cli -- run "Write a quicksort in Rust"
 ```
 
+## Workspace usage
+
+A workspace is a local directory the agent treats as its true working directory — it reads/writes files and runs commands directly inside it. To use one:
+
+1. **Add a workspace**: in the sidebar's **Workspaces** section, click **Add** and fill in a name (optional, defaults to the directory's base name) plus the path to an existing local directory. On desktop, **Browse** opens the native directory picker; in a plain browser, type the absolute path manually.
+2. **Set tool permissions**: check which tools the agent may use in this workspace (per-tool permission; all tools are allowed by default, and an empty selection means no restriction).
+3. **Select a workspace**: click a workspace in the sidebar to make it active — new sessions inherit it; you can also switch a specific session via the workspace selector in the chat header.
+4. **Start chatting**: the agent is told the workspace path and reads/writes files and runs commands relative to it.
+
+Screenshot:
+
+![workspace.png](workspace.png)
+
+> Without a workspace, files are written to `{data_dir}/outputs/` with a download link; with a workspace, they are written directly into the workspace directory. See [Tool Usage](#tool-usage).
+
 ---
 
 ## Configuration
@@ -501,13 +516,28 @@ The frontend will show a green "Download my.md" button.
 
 ### Workspaces
 
-A workspace is a local directory the agent treats as its working directory — it reads and writes directly inside it. Manage workspaces from the sidebar:
+A workspace is a local directory the agent treats as its true working directory — it reads/writes files and runs commands directly inside it. Manage workspaces from the sidebar:
 
-- **Add**: click **Add** to pick a directory through the native directory picker (desktop), then optionally adjust the name and check which tools the agent may use in that workspace (per-tool permissions; all tools are enabled by default). In a plain browser the picker is unavailable, so the path is entered manually.
+- **Add**: click **Add**, then fill in a name (optional, defaults to the directory's base name) and the path to an existing local directory. On desktop, **Browse** opens the native directory picker; in a plain browser, the path is entered manually.
 - **Select**: each session has a workspace selector in the chat header; new sessions inherit the currently selected sidebar workspace.
 - **Remove**: delete a workspace from the sidebar (this only removes the reference, never the directory or its files).
 
-When a workspace is active, the agent is told its path, relative file paths are resolved against it, and `write_file` writes directly into it (see [File writes and downloads](#file-writes-and-downloads)). The workspace's checked tools restrict which tools the agent may call in that session; an empty tool list means no restriction. Workspaces are stored as JSON files under `{data_dir}/workspaces/`.
+When a workspace is active:
+
+- **Prompt injection**: the engine appends `The user's workspace directory is: <path>. Prefer relative paths within it when reading or writing files.` to the system prompt, encouraging the model to use relative paths inside the workspace.
+- **Path resolution**: relative paths passed to `read_file`, `list_directory`, and `search` are resolved against the workspace directory (absolute paths are used as-is); `write_file` also strips a workspace prefix the model may have echoed, avoiding nested absolute-path directories.
+- **File writes**: `write_file` writes directly into the workspace and emits no download link; without a workspace it writes under `{data_dir}/outputs/` and returns a download link (see [File writes and downloads](#file-writes-and-downloads)).
+- **Command execution**: `execute_command` runs with the workspace as the current directory unless an explicit `working_dir` argument is provided.
+- **Tool permissions**: the workspace's checked tools are intersected with the requested tools, so the agent may only call tools allowed for that workspace; an empty tool list means no restriction.
+
+Workspaces are stored as JSON files under `{data_dir}/workspaces/` (one file per workspace, with `id`, `name`, `path`, `tools`, and `created_at`). The control-plane REST endpoints are:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/workspaces` | List all workspaces |
+| `POST` | `/api/v1/workspaces` | Create a workspace (`name`, `path`, `tools`) |
+| `DELETE` | `/api/v1/workspaces/:id` | Delete a workspace (reference only) |
+| `GET` | `/api/v1/workspaces/:id/files/:name` | Download a file from the workspace's `outputs/` subdirectory |
 
 ### Safety notes
 
