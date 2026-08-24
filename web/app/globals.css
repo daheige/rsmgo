@@ -161,3 +161,46 @@ a {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.code-block {
+  margin: 0.75rem 0;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: #0d1117;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem 0.3rem 0.75rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid #334155;
+}
+
+.code-lang {
+  font-size: 0.72rem;
+  color: #8b949e;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+/* Override the base `.markdown-content pre` and the highlight.js theme's
+   `pre code.hljs` (which sets its own padding/background) so the code block
+   background, padding, and scrollbar are controlled by `.code-block` alone. */
+.markdown-content .code-block pre {
+  margin: 0;
+  padding: 0.75rem;
+  background: transparent;
+  border-radius: 0;
+  overflow-x: auto;
+}
+
+.markdown-content .code-block pre code,
+.markdown-content .code-block pre code.hljs {
+  padding: 0;
+  background: transparent;
+}

@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Children, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import hljs from "highlight.js";
+import "highlight.js/styles/github-dark.css";
 import * as api from "@/lib/api";
 
 const WEB_SEARCH_TOOL = "web_search";
@@ -96,6 +98,69 @@ const RetryIcon = () => (
     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
   </svg>
 );
+
+// Copy arbitrary text to the clipboard, falling back to a hidden textarea for
+// non-secure contexts (e.g. the Tauri file:// origin).
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+}
+
+interface CodeBlockProps extends React.HTMLAttributes<HTMLPreElement> {
+  node?: unknown;
+}
+
+// Fenced code block wrapper: renders a language label + copy button header
+// above the highlighted <pre>. The raw text is read from the DOM at copy time
+// so highlighted (span-wrapped) code still copies as plain source.
+function CodeBlock({ children, node: _node, ...rest }: CodeBlockProps) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  const child = Children.toArray(children)[0] as
+    | React.ReactElement<{ className?: string }>
+    | undefined;
+  const lang = /language-([\w+-]+)/.exec(child?.props?.className ?? "")?.[1] ?? "code";
+
+  const copyCode = async () => {
+    try {
+      await writeClipboard(preRef.current?.textContent ?? "");
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      // Ignore copy failures; nothing actionable to surface in this context.
+    }
+  };
+
+  return (
+    <div className="code-block">
+      <div className="code-block-header">
+        <span className="code-lang">{lang}</span>
+        <button
+          className="msg-action"
+          onClick={copyCode}
+          title={copied ? "Copied" : "Copy code"}
+          aria-label="Copy code"
+        >
+          {copied ? <CheckIcon /> : <CopyIcon />}
+        </button>
+      </div>
+      <pre ref={preRef} {...rest}>
+        {children}
+      </pre>
+    </div>
+  );
+}
 
 interface ChatProps {
   sessionId?: string;
@@ -196,19 +261,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
   const copyMessage = async (m: api.Message, index: number) => {
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(m.content);
-      } else {
-        // Fallback for non-secure contexts (e.g. the Tauri file:// origin).
-        const ta = document.createElement("textarea");
-        ta.value = m.content;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-      }
+      await writeClipboard(m.content);
       setCopiedIndex(index);
       window.setTimeout(() => {
         setCopiedIndex((cur) => (cur === index ? null : cur));
@@ -277,6 +330,40 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
+                    pre: ({ children, node, ...rest }) => (
+                      <CodeBlock node={node} {...rest}>
+                        {children}
+                      </CodeBlock>
+                    ),
+                    code: ({ className, children, node: _node, ...rest }) => {
+                      const match = /language-([\w+-]+)/.exec(className || "");
+                      if (match) {
+                        const lang = match[1];
+                        const code = String(children).replace(/\n$/, "");
+                        if (hljs.getLanguage(lang)) {
+                          try {
+                            const html = hljs.highlight(code, {
+                              language: lang,
+                              ignoreIllegals: true,
+                            }).value;
+                            return (
+                              <code
+                                className={`hljs ${className ?? ""}`}
+                                dangerouslySetInnerHTML={{ __html: html }}
+                                {...rest}
+                              />
+                            );
+                          } catch {
+                            // Fall through to plain rendering on unexpected errors.
+                          }
+                        }
+                      }
+                      return (
+                        <code className={className} {...rest}>
+                          {children}
+                        </code>
+                      );
+                    },
                     a: ({ href, children }) => {
                       const isDownload =
                         typeof href === "string" &&
