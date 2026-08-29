@@ -15,12 +15,14 @@ type Config struct {
 	EngineAddr string
 	DataDir    string
 	Providers  []string
+	ChatStream bool
 }
 
 type appConfig struct {
 	Engine struct {
-		GrpcAddr string `yaml:"grpc_addr"`
-		DataDir  string `yaml:"data_dir"`
+		GrpcAddr   string `yaml:"grpc_addr"`
+		DataDir    string `yaml:"data_dir"`
+		ChatStream *bool  `yaml:"chat_stream"`
 	} `yaml:"engine"`
 	ControlPlane struct {
 		Addr       string `yaml:"addr"`
@@ -49,6 +51,17 @@ func Load() (Config, error) {
 		Addr:       firstNonEmpty(ac.ControlPlane.Addr, ":9090"),
 		EngineAddr: firstNonEmpty(ac.ControlPlane.EngineAddr, ac.Engine.GrpcAddr, "127.0.0.1:50051"),
 		DataDir:    expandTilde(firstNonEmpty(ac.Engine.DataDir, "./share/rsmgo")),
+		ChatStream: true,
+	}
+
+	if ac.Engine.ChatStream != nil {
+		cfg.ChatStream = *ac.Engine.ChatStream
+	}
+
+	// Allow container runtimes to point the control plane at a different engine
+	// hostname without editing the mounted app.yaml.
+	if addr := os.Getenv("RSMGO_ENGINE_ADDR"); addr != "" {
+		cfg.EngineAddr = addr
 	}
 
 	for _, p := range ac.Providers {

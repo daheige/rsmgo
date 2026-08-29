@@ -25,7 +25,7 @@ func main() {
 
 	sessionStore := session.NewStore(cfg.DataDir)
 
-	server := api.NewServer(engineClient, sessionStore, cfg.Providers, cfg.DataDir)
+	server := api.NewServer(engineClient, sessionStore, cfg.Providers, cfg.DataDir, cfg.ChatStream)
 	log.Printf("rsmgo control plane listening on %s (engine=%s data_dir=%s providers=%d)",
 		cfg.Addr, cfg.EngineAddr, cfg.DataDir, len(cfg.Providers))
 	if err := server.Run(cfg.Addr); err != nil {

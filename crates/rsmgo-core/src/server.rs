@@ -1,16 +1,21 @@
 use crate::agent::Agent;
 use crate::types::{
-    ChatRequest, ChatResponse, Message, MultiModalPart, ToolCall, ToolDefinition, Usage,
+    ChatRequest, ChatResponse, Message, MultiModalPart, StreamEvent, ToolCall, ToolDefinition,
+    Usage,
 };
 use axum::{
     extract::{Json, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Router,
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use rsmgo_pb::proto;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -168,21 +173,38 @@ impl Engine for EngineService {
 
     async fn chat_stream(
         &self,
-        _request: Request<ProtoChatRequest>,
+        request: Request<ProtoChatRequest>,
     ) -> std::result::Result<Response<Self::ChatStreamStream>, Status> {
-        // MVP: stream placeholder - return a single final chunk.
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let _ = tx
-            .send(Ok(ChatStreamChunk {
-                session_id: "placeholder".to_string(),
-                delta: "streaming not yet implemented in MVP".to_string(),
-                done: true,
-                message: None,
-                tool_calls: vec![],
-            }))
-            .await;
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(stream) as Self::ChatStreamStream))
+        let req = map_chat_request(request.into_inner());
+        let sid = req.session_id.clone();
+        let stream = self
+            .agent
+            .clone()
+            .chat_stream(req)
+            .await
+            .map_err(|e| Status::internal(format!("agent error: {}", e)))?;
+
+        let mapped = stream.map(move |item| {
+            item.map(|ev| match ev {
+                StreamEvent::Delta { text } => ChatStreamChunk {
+                    session_id: sid.clone(),
+                    delta: text,
+                    done: false,
+                    message: None,
+                    tool_calls: vec![],
+                },
+                StreamEvent::Done { response } => ChatStreamChunk {
+                    session_id: response.session_id,
+                    delta: String::new(),
+                    done: true,
+                    message: Some(map_message(&response.message)),
+                    tool_calls: response.tool_calls.iter().map(map_tool_call).collect(),
+                },
+            })
+            .map_err(|e| Status::internal(e.to_string()))
+        });
+
+        Ok(Response::new(Box::pin(mapped)))
     }
 
     async fn list_models(
@@ -255,6 +277,80 @@ async fn http_chat(
     Ok(axum::Json(resp))
 }
 
+#[derive(serde::Serialize)]
+struct ChatStreamChunkJson {
+    session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    delta: String,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn http_chat_stream(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> std::result::Result<
+    Sse<Pin<Box<dyn Stream<Item = std::result::Result<Event, Infallible>> + Send>>>,
+    StatusCode,
+> {
+    let session_id = req.session_id.clone();
+
+    if !state.chat_stream {
+        let resp = state.agent.chat(req).await.map_err(|e| {
+            tracing::error!("chat stream (buffered) error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let chunk = ChatStreamChunkJson {
+            session_id: resp.session_id.clone(),
+            delta: String::new(),
+            done: true,
+            message: Some(resp.message),
+            error: None,
+        };
+        let data = serde_json::to_string(&chunk).unwrap_or_default();
+        let stream = futures::stream::once(async move { Ok(Event::default().data(data)) });
+        return Ok(Sse::new(Box::pin(stream)));
+    }
+
+    let stream = state.agent.clone().chat_stream(req).await.map_err(|e| {
+        tracing::error!("chat stream error: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let stream = stream.map(move |item| {
+        let chunk = match item {
+            Ok(StreamEvent::Delta { text }) => ChatStreamChunkJson {
+                session_id: session_id.clone(),
+                delta: text,
+                done: false,
+                message: None,
+                error: None,
+            },
+            Ok(StreamEvent::Done { response }) => ChatStreamChunkJson {
+                session_id: response.session_id,
+                delta: String::new(),
+                done: true,
+                message: Some(response.message),
+                error: None,
+            },
+            Err(e) => ChatStreamChunkJson {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                done: false,
+                message: None,
+                error: Some(e.to_string()),
+            },
+        };
+        let data = serde_json::to_string(&chunk).unwrap_or_default();
+        Ok(Event::default().data(data))
+    });
+
+    Ok(Sse::new(Box::pin(stream)))
+}
+
 async fn http_list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let defs = state.agent.tool_definitions();
     axum::Json(defs)
@@ -272,13 +368,15 @@ async fn http_list_providers(State(state): State<Arc<AppState>>) -> impl IntoRes
 
 pub struct AppState {
     pub agent: Arc<Agent>,
+    pub chat_stream: bool,
 }
 
-pub fn http_router(agent: Arc<Agent>) -> Router {
-    let state = Arc::new(AppState { agent });
+pub fn http_router(agent: Arc<Agent>, chat_stream: bool) -> Router {
+    let state = Arc::new(AppState { agent, chat_stream });
     Router::new()
         .route("/health", get(http_health))
         .route("/api/v1/chat", post(http_chat))
+        .route("/api/v1/chat/stream", post(http_chat_stream))
         .route("/api/v1/tools", get(http_list_tools))
         .route("/api/v1/providers", get(http_list_providers))
         .with_state(state)
@@ -289,6 +387,7 @@ pub async fn run_server(
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
     app_http_debug: bool,
+    chat_stream: bool,
 ) -> crate::error::Result<()> {
     let service = EngineService::new(agent.clone());
     let grpc = tonic::transport::Server::builder()
@@ -303,7 +402,7 @@ pub async fn run_server(
         return grpc.await.map_err(|e| e.into());
     }
 
-    let app = http_router(agent);
+    let app = http_router(agent, chat_stream);
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     let http = axum::serve(listener, app);
     tracing::info!("HTTP debug API listening on {}", http_addr);

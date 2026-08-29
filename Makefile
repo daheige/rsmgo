@@ -1,8 +1,12 @@
-.PHONY: all build test fmt proto clean dev
+.PHONY: all build test fmt proto clean dev docker-build docker-run docker-stop docker-logs
 
 RUST_TARGET ?=
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
+
+DOCKER_IMAGE ?= rsmgo:latest
+DOCKER_NAME ?= rsmgo
+DOCKER_DATA_VOL ?= rsmgo-data
 
 all: build
 
@@ -54,6 +58,18 @@ dev:
 	@echo "1. cargo run -p rsmgo-core --bin rsmgo-engine"
 	@echo "2. go run ./control/cmd/rsmgo-control"
 	@echo "3. cd web && pnpm dev"
+
+docker-build:
+	docker compose build
+
+docker-run:
+	docker compose up -d
+
+docker-stop:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
 
 clean:
 	cargo clean

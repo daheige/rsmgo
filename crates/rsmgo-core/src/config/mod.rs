@@ -21,6 +21,10 @@ pub struct AppInfo {
     pub version: String,
 }
 
+fn default_chat_stream() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
     pub grpc_addr: String,
@@ -32,6 +36,12 @@ pub struct EngineConfig {
     /// Defaults to false (gRPC-only); opt in for local curl debugging.
     #[serde(default)]
     pub app_http_debug: bool,
+    /// When true (default), the control plane and HTTP debug API stream
+    /// assistant responses to the client. When false, responses are buffered
+    /// and returned in a single payload, which can help with proxies or
+    /// clients that do not support Server-Sent Events.
+    #[serde(default = "default_chat_stream")]
+    pub chat_stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +95,14 @@ impl AppConfig {
         let mut config: AppConfig = serde_yaml::from_str(&expanded)
             .map_err(|e| RsmgoError::Config(format!("failed to parse {:?}: {}", path, e)))?;
         config.engine.data_dir = expand_tilde(&config.engine.data_dir);
+        // Allow container runtimes to override listening addresses without editing
+        // the mounted app.yaml.
+        if let Ok(addr) = std::env::var("RSMGO_GRPC_ADDR") {
+            config.engine.grpc_addr = addr;
+        }
+        if let Ok(addr) = std::env::var("RSMGO_HTTP_ADDR") {
+            config.engine.http_addr = addr;
+        }
         Ok(config)
     }
 

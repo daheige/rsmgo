@@ -17,6 +17,7 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - [快速开始](#快速开始)
 - [配置文件](#配置文件)
 - [工具使用](#工具使用)
+- [Docker 运行环境](#docker-运行环境)
 - [常见问题与注意事项](#常见问题与注意事项)
 - [rsmgo http 服务调试](#rsmgo-http服务调试)
 - [组件说明](#组件说明)
@@ -301,10 +302,11 @@ cargo run -p rsmgo-core --bin rsmgo-engine
 - gRPC：`127.0.0.1:50051`
 - HTTP：`127.0.0.1:8080`
 
-### 4. 运行 Go 控制面
+### 4. 编译并运行 Go 控制面
 
 ```bash
-go run ./control/cmd/rsmgo-control
+go build -o rgo-control ./control/cmd/rsmgo-control
+./rgo-control
 ```
 
 控制面默认监听 `0.0.0.0:9090`。
@@ -392,6 +394,7 @@ engine:
   grpc_addr: "127.0.0.1:50051"
   http_addr: "127.0.0.1:8080"
   app_http_debug: true
+  chat_stream: true
   data_dir: "./share/rsmgo"
   system_prompt: |
     You are rsmgo, a model-agnostic AI agent assistant...
@@ -400,6 +403,7 @@ engine:
 - `grpc_addr`：引擎 gRPC 监听地址，是控制面（Go）与引擎之间的主通信通道。
 - `http_addr`：引擎内置 HTTP/JSON 调试接口的监听地址，仅当 `app_http_debug` 为 `true` 时启动。
 - `app_http_debug`：是否启动 HTTP 调试接口。`false`（默认）时仅监听 gRPC，减少端口暴露；`true` 时同时监听 gRPC 与 HTTP，便于本地调试。详见 [rsmgo http 服务调试](#rsmgo-http服务调试)。
+- `chat_stream`：是否默认以流式方式输出助手回复。`true`（默认）时前端调用 `/api/v1/sessions/:id/chat?stream=true` 会实时返回 SSE 数据；`false` 时即使前端请求流式，控制面也会把完整响应缓冲后一次性以 SSE 返回。该配置同时作用于 Go 控制面与 Rust 引擎的 HTTP 调试接口 `/api/v1/chat/stream`。
 - `data_dir`：SQLite 数据库与相关持久化文件存放路径，支持相对路径（如 `./share/rsmgo`）以及 `~` 主目录展开（如 `~/.local/share/rsmgo`）。
 - `system_prompt`：前置到默认系统提示词之前。最终提示词为 `{默认系统提示词}\n\n{system_prompt}`，因此即使配置了自定义提示词，保留 `write_file` 下载链接等关键指令也会始终生效。
 
@@ -562,6 +566,61 @@ Download: [Download my.md](/api/v1/files/my.md)
 
 ---
 
+## Docker 运行环境
+
+项目已提供 [Dockerfile](Dockerfile) 与 [docker-entrypoint.sh](docker-entrypoint.sh)，可在单个容器内同时启动：
+
+- Rust 引擎 gRPC（`0.0.0.0:50051`）
+- Rust 引擎 HTTP 调试接口（`0.0.0.0:8080`）
+- Go 控制面（`0.0.0.0:9090`）
+- Next.js Web UI（`0.0.0.0:1338`）
+
+[docker-compose.yaml](docker-compose.yaml) 默认将项目根目录的 [app.yaml](app.yaml) 以 `-v` 方式挂载到 `engine` 与 `control` 容器中，并通过环境变量覆盖跨容器所需的地址：
+
+- `engine`：`RSMGO_GRPC_ADDR=0.0.0.0:50051`、`RSMGO_HTTP_ADDR=0.0.0.0:8080`
+- `control`：`RSMGO_ENGINE_ADDR=engine:50051`
+
+[Makefile](Makefile) 已封装常用命令：
+
+```bash
+# 构建镜像
+docker compose build
+
+# 启动服务（推荐：先复制 .env.example 为 .env 并填写 API Key）
+cp .env.example .env
+# 编辑 .env，填写 DEEPSEEK_API_KEY 等实际使用的模型密钥
+docker compose up -d
+
+# 或继续使用 Makefile
+make docker-build
+make docker-run
+
+# 查看日志
+make docker-logs
+
+# 停止并删除容器
+make docker-stop
+```
+
+运行后访问 http://localhost:1338 即可使用 Web UI。
+
+### 端口说明
+
+| 端口 | 服务 |
+|------|------|
+| `1338` | Web UI |
+| `9090` | Go 控制面 |
+| `8080` | Rust 引擎 HTTP 调试接口 |
+| `50051` | Rust 引擎 gRPC |
+
+### 数据持久化与自定义配置
+
+Compose 默认使用 `rsmgo-data` Docker volume，挂载到 `engine` 与 `control` 容器的 `/app/share/rsmgo`，用于保存会话、记忆与工作区数据。
+
+默认通过 `-v ./app.yaml:/app/app.yaml:ro` 挂载项目根目录的 [app.yaml](app.yaml)。如需使用自定义配置，直接修改 `app.yaml` 即可；容器内会通过环境变量自动覆盖引擎监听地址与控制面引擎地址，无需手动改动 `engine.grpc_addr` / `control_plane.engine_addr`。
+
+---
+
 ## 常见问题与注意事项
 
 ### 1. Kimi / Moonshot 返回 404 `resource_not_found_error`
@@ -623,6 +682,7 @@ engine:
 |------|------|------|
 | `GET` | `/health` | 健康检查，返回 `status` 与 `version` |
 | `POST` | `/api/v1/chat` | 直接以 JSON `ChatRequest` 调用 `Agent::chat`（不经 gRPC） |
+| `POST` | `/api/v1/chat/stream` | 以 SSE 方式流式调用 `Agent::chat_stream`；若 `chat_stream: false` 则整体缓冲后一次性返回 |
 | `GET` | `/api/v1/tools` | 列出已注册工具及其定义 |
 | `GET` | `/api/v1/providers` | 列出已配置的 provider 名称 |
 
@@ -639,6 +699,20 @@ curl http://127.0.0.1:8080/health
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/chat \
   -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "debug-1",
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+流式对话（SSE）：
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/api/v1/chat/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
   -d '{
     "session_id": "debug-1",
     "provider": "deepseek",
@@ -716,7 +790,6 @@ pnpm tauri build
 
 rsmgo 当前处于 MVP 阶段，后续计划在以下方向持续演进：
 
-- **流式响应**：实现 `ChatStream` gRPC/HTTP 流式接口，让前端可实时接收模型输出。
 - **MCP 协议支持**：接入 Model Context Protocol，扩展工具生态与外部数据源。
 - **更丰富的工具**：增加网络请求、数据库查询、Git 操作、浏览器自动化等工具。
 - **多 Agent 协作**：支持任务分解、子 Agent 调用与结果汇总。

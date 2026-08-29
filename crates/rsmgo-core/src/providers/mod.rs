@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
 use crate::error::Result;
-use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolDefinition};
+use crate::types::{ChatRequest, ChatResponse, ModelInfo, StreamEvent, ToolDefinition};
 use async_trait::async_trait;
+use futures::Stream;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub mod anthropic;
@@ -17,6 +19,14 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
     async fn chat(&self, request: ChatRequest, tools: Vec<ToolDefinition>) -> Result<ChatResponse>;
+
+    /// Stream the model's response, yielding text deltas followed by a final
+    /// `StreamEvent::Done` carrying the complete response (with any tool calls).
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>>;
 }

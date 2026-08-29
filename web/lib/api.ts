@@ -24,6 +24,14 @@ export interface Message {
   sent_at?: string;
 }
 
+export interface ChatStreamChunk {
+  session_id?: string;
+  delta?: string;
+  done?: boolean;
+  message?: Message;
+  error?: string;
+}
+
 export interface ToolInfo {
   name: string;
   description: string;
@@ -132,6 +140,83 @@ export async function cancelChat(id: string): Promise<void> {
   await fetchJSON<{ cancelled: boolean }>(`/api/v1/sessions/${id}/chat/cancel`, {
     method: "POST",
   });
+}
+
+// Stream a chat request over Server-Sent Events. `onDelta` fires for each text
+// fragment as it arrives; `onDone` fires once with the complete assistant
+// message. Unlike `chat`, this does not buffer the whole response up front.
+export async function chatStream(
+  id: string,
+  content: string,
+  opts: ChatOptions,
+  signal: AbortSignal,
+  onDelta: (delta: string) => void,
+  onDone: (message: Message) => void,
+): Promise<void> {
+  const res = await fetch(`${baseUrl()}/api/v1/sessions/${id}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify({
+      content,
+      tool_names: opts.toolNames ?? [],
+      web_search: opts.webSearch ?? false,
+      attachment_ids: opts.attachmentIds ?? [],
+      regenerate: opts.regenerate ?? false,
+      stream: true,
+    }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  if (!res.body) {
+    throw new Error("streaming response has no body");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const processEvent = (raw: string) => {
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trimEnd();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (!data) continue;
+      let chunk: ChatStreamChunk;
+      try {
+        chunk = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (chunk.error) throw new Error(chunk.error);
+      if (chunk.done && chunk.message) {
+        onDone(chunk.message);
+      } else if (typeof chunk.delta === "string" && chunk.delta) {
+        onDelta(chunk.delta);
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      processEvent(raw);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) processEvent(buffer);
 }
 
 export async function listWorkspaces(): Promise<Workspace[]> {

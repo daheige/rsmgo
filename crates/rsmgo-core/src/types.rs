@@ -118,6 +118,15 @@ pub struct ChatResponse {
     pub usage: Usage,
 }
 
+/// A single event emitted while streaming an agent response. `Delta` carries a
+/// slice of the assistant's text; `Done` carries the complete final response
+/// (which may include structured tool calls when the model decided to act).
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Delta { text: String },
+    Done { response: ChatResponse },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,

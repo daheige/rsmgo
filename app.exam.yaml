@@ -8,6 +8,10 @@ engine:
   # When true, also serve a small HTTP/JSON debug API on http_addr.
   # Defaults to false (gRPC-only); set to true for local curl debugging.
   app_http_debug: false
+  # When true (default), assistant responses are streamed to the client via
+  # Server-Sent Events. Set to false to buffer the full response and send it
+  # in a single payload (useful for proxies/clients that do not support SSE).
+  chat_stream: true
   # Data directory for memory and session storage.
   # Supports ~ for home directory.
   data_dir: "./share/rsmgo"

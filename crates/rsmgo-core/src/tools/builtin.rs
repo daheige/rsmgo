@@ -443,7 +443,9 @@ mod tests {
             "console.log('hi')"
         );
         // The nested absolute path must NOT have been created.
-        let nested = ws_dir.join(ws_dir.strip_prefix("/").unwrap_or(&ws_dir)).join("demo/server.js");
+        let nested = ws_dir
+            .join(ws_dir.strip_prefix("/").unwrap_or(&ws_dir))
+            .join("demo/server.js");
         assert!(!nested.exists());
         let _ = fs::remove_dir_all(&data_dir);
         let _ = fs::remove_dir_all(&ws_dir);

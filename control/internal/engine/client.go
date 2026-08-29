@@ -37,6 +37,10 @@ func (c *Client) Chat(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRespons
 	return c.engine.Chat(ctx, req)
 }
 
+func (c *Client) ChatStream(ctx context.Context, req *pb.ChatRequest) (pb.Engine_ChatStreamClient, error) {
+	return c.engine.ChatStream(ctx, req)
+}
+
 func (c *Client) ListTools(ctx context.Context) (*pb.ListToolsResponse, error) {
 	return c.engine.ListTools(ctx, &pb.ListToolsRequest{})
 }

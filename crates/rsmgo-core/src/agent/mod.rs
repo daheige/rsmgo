@@ -1,9 +1,11 @@
 use crate::error::{Result, RsmgoError};
 use crate::memory::MemoryStore;
-use crate::providers::{default_registry, ProviderRegistry};
+use crate::providers::{default_registry, ProviderRef, ProviderRegistry};
 use crate::tools::{ToolContext, ToolDefinition, ToolRegistry};
-use crate::types::{ChatRequest, ChatResponse, Message, ToolCall};
+use crate::types::{ChatRequest, ChatResponse, Message, StreamEvent, ToolCall};
+use futures::{Stream, StreamExt};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = r#"
@@ -65,7 +67,14 @@ impl Agent {
         self.tools.definitions()
     }
 
-    pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatResponse> {
+    /// Shared request preamble for `chat` and `chat_stream`: resolve the
+    /// provider, ensure the session exists, persist incoming user/tool messages,
+    /// build the tool context and system-prompt-augmented message history, and
+    /// select the tool definitions to expose.
+    fn prepare(
+        &self,
+        request: &mut ChatRequest,
+    ) -> Result<(ProviderRef, ToolContext, Vec<ToolDefinition>)> {
         let provider = self.providers.get(&request.provider).ok_or_else(|| {
             RsmgoError::Provider(format!("unknown provider: {}", request.provider))
         })?;
@@ -143,6 +152,12 @@ impl Agent {
             tool_count = tool_defs.len(),
             "chat request"
         );
+
+        Ok((provider, tool_ctx, tool_defs))
+    }
+
+    pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatResponse> {
+        let (provider, tool_ctx, tool_defs) = self.prepare(&mut request)?;
 
         let mut response = provider.chat(request.clone(), tool_defs.clone()).await?;
 
@@ -236,7 +251,10 @@ impl Agent {
             if !tool_defs.is_empty() && response.tool_calls.is_empty() {
                 let dsml_calls = parse_dsml_tool_calls(&response.message.content);
                 if !dsml_calls.is_empty() {
-                    tracing::info!(count = dsml_calls.len(), "parsed DSML tool calls (follow-up)");
+                    tracing::info!(
+                        count = dsml_calls.len(),
+                        "parsed DSML tool calls (follow-up)"
+                    );
                     response.message.content = strip_dsml_tool_calls(&response.message.content);
                     response.tool_calls = dsml_calls;
                 }
@@ -251,6 +269,168 @@ impl Agent {
             .add_message(&request.session_id, &response.message)?;
         Ok(response)
     }
+
+    pub async fn chat_stream(
+        self: Arc<Self>,
+        mut request: ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let (provider, tool_ctx, tool_defs) = self.prepare(&mut request)?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamEvent>>(64);
+        let this = self.clone();
+
+        tokio::spawn(async move {
+            const MAX_TOOL_ROUNDS: usize = 8;
+
+            let first = match provider
+                .chat_stream(request.clone(), tool_defs.clone())
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            let mut response = match collect_round(first, &tx).await {
+                Some(Ok(r)) => r,
+                Some(Err(e)) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                None => return,
+            };
+
+            // DSML/inline fallback for providers that return tool calls inside
+            // message.content (DeepSeek, Kimi).
+            if !tool_defs.is_empty() && response.tool_calls.is_empty() {
+                let dsml_calls = parse_dsml_tool_calls(&response.message.content);
+                if !dsml_calls.is_empty() {
+                    response.message.content = strip_dsml_tool_calls(&response.message.content);
+                    response.tool_calls = dsml_calls;
+                } else {
+                    let inline_calls = parse_inline_tool_calls(&response.message.content);
+                    if !inline_calls.is_empty() {
+                        response.message.content =
+                            strip_inline_tool_calls(&response.message.content);
+                        response.tool_calls = inline_calls;
+                    }
+                }
+            }
+
+            let mut messages = request.messages.clone();
+            for _ in 0..MAX_TOOL_ROUNDS {
+                if response.tool_calls.is_empty() {
+                    break;
+                }
+                let assistant_message = Message::assistant_with_tool_calls(
+                    response.message.content.clone(),
+                    response.tool_calls.clone(),
+                );
+                if let Err(e) = this
+                    .memory
+                    .add_message(&request.session_id, &assistant_message)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                messages.push(assistant_message);
+
+                let mut tool_results: Vec<Message> = Vec::new();
+                for tc in &response.tool_calls {
+                    let result = this
+                        .tools
+                        .execute(&tc.name, tc.arguments.clone(), &tool_ctx);
+                    let content = match result {
+                        Ok(out) => out,
+                        Err(e) => format!("Error: {}", e),
+                    };
+                    tool_results.push(Message::tool(content, &tc.id));
+                }
+                for msg in &tool_results {
+                    if let Err(e) = this.memory.add_message(&request.session_id, msg) {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+                messages.extend(tool_results);
+
+                let follow_up_request = ChatRequest {
+                    session_id: request.session_id.clone(),
+                    messages: messages.clone(),
+                    provider: request.provider.clone(),
+                    model: request.model.clone(),
+                    tool_names: request.tool_names.clone(),
+                    stream: true,
+                    workspace: request.workspace.clone(),
+                    workspace_id: request.workspace_id.clone(),
+                };
+
+                let next = match provider
+                    .chat_stream(follow_up_request, tool_defs.clone())
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+                response = match collect_round(next, &tx).await {
+                    Some(Ok(r)) => r,
+                    Some(Err(e)) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    None => return,
+                };
+
+                // Re-parse DSML tool calls on the follow-up response too.
+                if !tool_defs.is_empty() && response.tool_calls.is_empty() {
+                    let dsml_calls = parse_dsml_tool_calls(&response.message.content);
+                    if !dsml_calls.is_empty() {
+                        response.message.content = strip_dsml_tool_calls(&response.message.content);
+                        response.tool_calls = dsml_calls;
+                    }
+                }
+            }
+
+            if let Err(e) = this
+                .memory
+                .add_message(&request.session_id, &response.message)
+            {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            let _ = tx.send(Ok(StreamEvent::Done { response })).await;
+        });
+
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+/// Consume one provider stream, forwarding `Delta` events downstream and
+/// returning the final `Done` response. Returns `None` when the downstream
+/// receiver is gone (client disconnected — the caller should stop), or
+/// `Some(Err(e))` when the stream errored before a `Done` arrived.
+async fn collect_round(
+    mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
+    tx: &tokio::sync::mpsc::Sender<Result<StreamEvent>>,
+) -> Option<Result<ChatResponse>> {
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(StreamEvent::Delta { text }) => {
+                if tx.send(Ok(StreamEvent::Delta { text })).await.is_err() {
+                    return None;
+                }
+            }
+            Ok(StreamEvent::Done { response }) => return Some(Ok(response)),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Err(RsmgoError::Provider(
+        "stream ended without Done".to_string(),
+    )))
 }
 
 /// Parse tool calls embedded in message content as DSML/XML blocks.
@@ -259,12 +439,36 @@ impl Agent {
 /// DSML markup inside `message.content` rather than the structured `tool_calls`
 /// field. Each tag is wrapped in the fullwidth vertical bar U+FF5C, doubled on
 /// both sides of "DSML" (see the DSML_* delimiters below for the exact bytes).
-const DSML_TOOL_CALLS_OPEN: &str = concat!("\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "tool_calls", "\u{3e}");
-const DSML_TOOL_CALLS_CLOSE: &str = concat!("\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "tool_calls", "\u{3e}");
-const DSML_INVOKE_OPEN: &str = concat!("\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "invoke", " name=\u{22}");
-const DSML_INVOKE_CLOSE: &str = concat!("\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "invoke", "\u{3e}");
-const DSML_PARAM_OPEN: &str = concat!("\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "parameter", " name=\u{22}");
-const DSML_PARAM_CLOSE: &str = concat!("\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}", "parameter", "\u{3e}");
+const DSML_TOOL_CALLS_OPEN: &str = concat!(
+    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "tool_calls",
+    "\u{3e}"
+);
+const DSML_TOOL_CALLS_CLOSE: &str = concat!(
+    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "tool_calls",
+    "\u{3e}"
+);
+const DSML_INVOKE_OPEN: &str = concat!(
+    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "invoke",
+    " name=\u{22}"
+);
+const DSML_INVOKE_CLOSE: &str = concat!(
+    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "invoke",
+    "\u{3e}"
+);
+const DSML_PARAM_OPEN: &str = concat!(
+    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "parameter",
+    " name=\u{22}"
+);
+const DSML_PARAM_CLOSE: &str = concat!(
+    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
+    "parameter",
+    "\u{3e}"
+);
 
 fn parse_dsml_tool_calls(content: &str) -> Vec<ToolCall> {
     let Some(start) = content.find(DSML_TOOL_CALLS_OPEN) else {
@@ -532,7 +736,8 @@ mod tests {
 
     #[test]
     fn strip_inline_tool_calls_skips_multibyte_content() {
-        let content = "好的（我来创建一个文件）write_file:0{\"path\":\"my.md\",\"content\":\"hi\"} 完成。";
+        let content =
+            "好的（我来创建一个文件）write_file:0{\"path\":\"my.md\",\"content\":\"hi\"} 完成。";
         let stripped = strip_inline_tool_calls(content);
         assert_eq!(stripped, "好的（我来创建一个文件） 完成。");
     }

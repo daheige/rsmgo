@@ -42,12 +42,13 @@ type Server struct {
 	defaultProvider string
 	uploadDir       string
 	outputsDir      string
+	chatStream      bool
 	// activeChats maps session id -> context cancel func for in-flight chat
 	// requests, so a user can stop generation.
 	activeChats sync.Map
 }
 
-func NewServer(engineClient *engine.Client, store *session.Store, providers []string, dataDir string) *Server {
+func NewServer(engineClient *engine.Client, store *session.Store, providers []string, dataDir string, chatStream bool) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -75,6 +76,7 @@ func NewServer(engineClient *engine.Client, store *session.Store, providers []st
 		defaultProvider: defaultProvider,
 		uploadDir:       uploadDir,
 		outputsDir:      outputsDir,
+		chatStream:      chatStream,
 	}
 	s.registerRoutes()
 	return s
@@ -317,6 +319,7 @@ type chatRequest struct {
 	WebSearch     bool     `json:"web_search"`
 	AttachmentIDs []string `json:"attachment_ids"`
 	Regenerate    bool     `json:"regenerate"`
+	Stream        bool     `json:"stream"`
 }
 
 func (s *Server) chat(c *gin.Context) {
@@ -390,10 +393,14 @@ func (s *Server) chat(c *gin.Context) {
 		s.activeChats.Delete(id)
 		cancel()
 	}()
-	ctx, timeoutCancel := context.WithTimeout(ctx, 120*time.Second)
+	timeout := 120 * time.Second
+	if req.Stream {
+		timeout = 5 * time.Minute
+	}
+	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 
-	resp, err := s.engine.Chat(ctx, &pb.ChatRequest{
+	pbReq := &pb.ChatRequest{
 		SessionId:   id,
 		Messages:    pbMessages,
 		Provider:    sess.Provider,
@@ -401,15 +408,35 @@ func (s *Server) chat(c *gin.Context) {
 		ToolNames:   toolNames,
 		Workspace:   workspacePath,
 		WorkspaceId: workspaceID,
-	})
+	}
+
+	if req.Stream && s.chatStream {
+		s.streamChat(c, ctx, id, sess, pbReq, started)
+		return
+	}
+
+	resp, err := s.engine.Chat(ctx, pbReq)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			log.Printf("chat cancelled session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
+			if req.Stream {
+				sseError(c.Writer, "cancelled")
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"cancelled": true})
 			return
 		}
 		log.Printf("chat failed session=%s: %v", id, err)
+		if req.Stream {
+			sseError(c.Writer, err.Error())
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Stream {
+		s.streamSingle(c, id, sess, resp, started)
 		return
 	}
 
@@ -423,6 +450,111 @@ func (s *Server) chat(c *gin.Context) {
 	_ = s.sessions.Update(sess)
 	log.Printf("chat done session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
 	c.JSON(http.StatusOK, resp)
+}
+
+// streamSingle writes a single non-streaming ChatResponse to an SSE stream.
+// Used when the client requested streaming but the server has disabled it via
+// the chat_stream configuration option.
+func (s *Server) streamSingle(c *gin.Context, id string, sess *session.Session, resp *pb.ChatResponse, started time.Time) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	if resp.Message != nil {
+		sess.Messages = append(sess.Messages, session.Message{
+			Role:    resp.Message.Role,
+			Content: resp.Message.Content,
+			SentAt:  time.Now().UTC(),
+		})
+		_ = s.sessions.Update(sess)
+	}
+
+	chunk := &pb.ChatStreamChunk{
+		SessionId: id,
+		Delta:     "",
+		Done:      true,
+		Message:   resp.Message,
+		ToolCalls: resp.ToolCalls,
+	}
+	data, _ := json.Marshal(chunk)
+	_, _ = c.Writer.WriteString("data: ")
+	_, _ = c.Writer.Write(data)
+	_, _ = c.Writer.WriteString("\n\n")
+	c.Writer.Flush()
+	log.Printf("chat buffered stream done session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
+}
+
+// streamChat relays the engine's ChatStream gRPC stream to the client as
+// Server-Sent Events: each chunk is marshalled to JSON and written as a
+// `data:` line, with the final assistant message persisted to the session when
+// the stream reports done.
+func (s *Server) streamChat(c *gin.Context, ctx context.Context, id string, sess *session.Session, pbReq *pb.ChatRequest, started time.Time) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	stream, err := s.engine.ChatStream(ctx, pbReq)
+	if err != nil {
+		log.Printf("chat stream open failed session=%s: %v", id, err)
+		sseError(c.Writer, err.Error())
+		return
+	}
+
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if ctx.Err() == context.Canceled {
+				log.Printf("chat stream cancelled session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
+				return
+			}
+			log.Printf("chat stream failed session=%s: %v", id, err)
+			sseError(c.Writer, err.Error())
+			return
+		}
+
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			sseError(c.Writer, err.Error())
+			return
+		}
+		if _, err := c.Writer.WriteString("data: "); err != nil {
+			return
+		}
+		if _, err := c.Writer.Write(data); err != nil {
+			return
+		}
+		if _, err := c.Writer.WriteString("\n\n"); err != nil {
+			return
+		}
+		c.Writer.Flush()
+
+		if chunk.Done && chunk.Message != nil {
+			sess.Messages = append(sess.Messages, session.Message{
+				Role:    chunk.Message.Role,
+				Content: chunk.Message.Content,
+				SentAt:  time.Now().UTC(),
+			})
+			_ = s.sessions.Update(sess)
+		}
+	}
+	log.Printf("chat stream done session=%s after=%s", id, time.Since(started).Round(time.Millisecond))
+}
+
+// sseError writes a single SSE error event and flushes it to the client. Used
+// to report a stream failure after the response has already started.
+func sseError(w gin.ResponseWriter, msg string) {
+	data, _ := json.Marshal(gin.H{"error": msg})
+	_, _ = w.WriteString("data: ")
+	_, _ = w.Write(data)
+	_, _ = w.WriteString("\n\n")
+	w.Flush()
 }
 
 // workspaceFor resolves a workspace id into its workspace record. An unknown or

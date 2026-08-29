@@ -177,6 +177,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   const [webSearch, setWebSearch] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [streamingText, setStreamingText] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -199,7 +200,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+  }, [messages, loading, streamingText]);
 
   // Reset the textarea to the default height on mount so the browser does not
   // restore a previously resized height.
@@ -215,13 +216,18 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
     if (!sessionId) return;
     setLoading(true);
     setError(null);
+    setStreamingText("");
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const resp = await api.chat(sessionId, content, opts, controller.signal);
-      if (resp.message) {
-        setMessages((prev) => [...prev, resp.message!]);
-      }
+      await api.chatStream(
+        sessionId,
+        content,
+        opts,
+        controller.signal,
+        (delta) => setStreamingText((prev) => prev + delta),
+        (message) => setMessages((prev) => [...prev, message]),
+      );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
         // User cancelled generation; do not surface as an error.
@@ -230,6 +236,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      setStreamingText("");
       setLoading(false);
     }
   };
@@ -322,7 +329,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
               key={i}
               style={{
                 ...styles.message,
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                alignSelf: m.role === "user" ? "flex-end" : "stretch",
                 background: m.role === "user" ? "#2563eb" : "#1e293b",
               }}
             >
@@ -428,7 +435,22 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
             </div>
           );
         })}
-        {loading && <div style={styles.typing}>Thinking...</div>}
+        {loading &&
+          (streamingText ? (
+            <div
+              style={{
+                ...styles.message,
+                alignSelf: "stretch",
+                background: "#1e293b",
+              }}
+            >
+              <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {streamingText}
+              </div>
+            </div>
+          ) : (
+            <div style={styles.typing}>Thinking...</div>
+          ))}
         {error && <div style={styles.error}>{error}</div>}
         <div ref={bottomRef} />
       </div>

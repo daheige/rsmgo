@@ -1,0 +1,41 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Go
+*.exe
+rgo-control
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+.next/
+out/
+dist/
+
+# Desktop
+desktop/src-tauri/target/
+desktop/node_modules/
+
+# Data / secrets
+share/
+*.db
+*.db-journal
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+docker-compose.yaml
+Dockerfile
+docker-entrypoint.sh
+.dockerignore

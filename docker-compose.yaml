@@ -1,0 +1,71 @@
+services:
+  engine:
+    build:
+      context: .
+      args:
+        # Web UI in this build talks to the control plane via its Compose hostname.
+        RSMGO_CONTROL_URL: http://control:9090
+    image: rsmgo:latest
+    container_name: rsmgo-engine
+    command: ["engine"]
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    volumes:
+      - ./app.yaml:/app/app.yaml:ro
+      - rsmgo-data:/app/share/rsmgo
+    environment:
+      # Override listening addresses so the engine is reachable from other containers.
+      - RSMGO_GRPC_ADDR=0.0.0.0:50051
+      - RSMGO_HTTP_ADDR=0.0.0.0:8080
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    networks:
+      - rsmgo-net
+
+  control:
+    image: rsmgo:latest
+    container_name: rsmgo-control
+    command: ["control"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./app.yaml:/app/app.yaml:ro
+      - rsmgo-data:/app/share/rsmgo
+    environment:
+      # Point the control plane at the engine service hostname inside Compose.
+      - RSMGO_ENGINE_ADDR=engine:50051
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    networks:
+      - rsmgo-net
+    depends_on:
+      - engine
+
+  web:
+    image: rsmgo:latest
+    container_name: rsmgo-web
+    command: ["web"]
+    ports:
+      - "1338:1338"
+    environment:
+      - PORT=1338
+    networks:
+      - rsmgo-net
+    depends_on:
+      - control
+
+volumes:
+  rsmgo-data:
+
+networks:
+  rsmgo-net:
+    driver: bridge

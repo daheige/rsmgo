@@ -1,13 +1,19 @@
 use crate::error::{Result, RsmgoError};
 use crate::providers::LlmProvider;
 use crate::types::{
-    ChatRequest, ChatResponse, Message, ModelInfo, ToolCall, ToolDefinition, Usage,
+    ChatRequest, ChatResponse, Message, ModelInfo, StreamEvent, ToolCall, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::pin::Pin;
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+// Streaming responses can legitimately run longer than a single buffered call
+// (token-by-token delivery), so give them a more generous total timeout.
+const STREAM_TIMEOUT_SECONDS: u64 = 300;
 
 #[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
@@ -149,6 +155,64 @@ impl OpenAiCompatibleProvider {
             ],
         )
     }
+
+    /// Build the `/chat/completions` request body, shared by the buffered and
+    /// streaming paths. Only the `stream` flag differs between them.
+    fn build_payload(
+        &self,
+        request: &ChatRequest,
+        tools: Vec<ToolDefinition>,
+        stream: bool,
+    ) -> OpenAiChatRequest {
+        let model = if request.model.is_empty() {
+            self.default_model.clone()
+        } else {
+            request.model.clone()
+        };
+
+        let include_images = is_vision_model(&model);
+
+        let messages: Vec<OpenAiMessage> = request
+            .messages
+            .iter()
+            .map(|m| OpenAiMessage {
+                role: m.role.clone(),
+                content: openai_content(m, include_images),
+                tool_call_id: m.tool_call_id.clone(),
+                tool_calls: m.tool_calls.as_ref().map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| OpenAiToolCall {
+                            id: tc.id.clone(),
+                            typ: "function".to_string(),
+                            function: OpenAiToolCallFunction {
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.to_string(),
+                            },
+                        })
+                        .collect()
+                }),
+            })
+            .collect();
+
+        let tools_payload: Vec<OpenAiTool> = tools
+            .into_iter()
+            .map(|t| OpenAiTool {
+                typ: "function".to_string(),
+                function: OpenAiFunction {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                },
+            })
+            .collect();
+
+        OpenAiChatRequest {
+            model,
+            messages,
+            tools: tools_payload,
+            stream,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -262,6 +326,91 @@ struct OpenAiUsage {
     total_tokens: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChunk {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiStreamDelta,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiStreamDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamToolCall {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiStreamToolCallFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamToolCallFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Accumulates the fragmented pieces of a single streaming tool call (indexed by
+/// `delta.tool_calls[].index`) into a complete `ToolCall`.
+#[derive(Debug, Default)]
+struct OpenAiToolCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Parse one SSE event body (the text between `\n\n` boundaries) and fold its
+/// `data:` lines into the tool-call accumulators. Returns the concatenated text
+/// content carried by the event so the caller can forward it as a `Delta`.
+fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) -> String {
+    let mut appended = String::new();
+    for line in event.lines() {
+        let line = line.trim_end_matches('\r');
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) else {
+            continue;
+        };
+        for choice in chunk.choices {
+            let delta = choice.delta;
+            if let Some(content) = delta.content {
+                appended.push_str(&content);
+            }
+            if let Some(list) = delta.tool_calls {
+                for tc in list {
+                    let acc = tcs.entry(tc.index).or_default();
+                    if let Some(id) = tc.id {
+                        acc.id = id;
+                    }
+                    if let Some(f) = tc.function {
+                        if let Some(n) = f.name {
+                            acc.name.push_str(&n);
+                        }
+                        if let Some(a) = f.arguments {
+                            acc.arguments.push_str(&a);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    appended
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
@@ -276,54 +425,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             )));
         }
 
-        let model = if request.model.is_empty() {
-            self.default_model.clone()
-        } else {
-            request.model
-        };
-
-        let include_images = is_vision_model(&model);
-
-        let messages: Vec<OpenAiMessage> = request
-            .messages
-            .iter()
-            .map(|m| OpenAiMessage {
-                role: m.role.clone(),
-                content: openai_content(m, include_images),
-                tool_call_id: m.tool_call_id.clone(),
-                tool_calls: m.tool_calls.as_ref().map(|tcs| {
-                    tcs.iter()
-                        .map(|tc| OpenAiToolCall {
-                            id: tc.id.clone(),
-                            typ: "function".to_string(),
-                            function: OpenAiToolCallFunction {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.to_string(),
-                            },
-                        })
-                        .collect()
-                }),
-            })
-            .collect();
-
-        let tools_payload: Vec<OpenAiTool> = tools
-            .into_iter()
-            .map(|t| OpenAiTool {
-                typ: "function".to_string(),
-                function: OpenAiFunction {
-                    name: t.name,
-                    description: t.description,
-                    parameters: t.parameters,
-                },
-            })
-            .collect();
-
-        let payload = OpenAiChatRequest {
-            model,
-            messages,
-            tools: tools_payload,
-            stream: false,
-        };
+        let payload = self.build_payload(&request, tools, false);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
@@ -399,6 +501,123 @@ impl LlmProvider for OpenAiCompatibleProvider {
             tool_calls,
             usage,
         })
+    }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        if self.api_key.is_empty() {
+            return Err(RsmgoError::Provider(format!(
+                "{} API key not configured",
+                self.name
+            )));
+        }
+
+        let session_id = request.session_id.clone();
+        let payload = self.build_payload(&request, tools, true);
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
+        let name = self.name.clone();
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(STREAM_TIMEOUT_SECONDS))
+            .build()?;
+
+        let response = client
+            .post(format!("{}/chat/completions", base_url))
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| RsmgoError::Provider(format!("HTTP error: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(RsmgoError::Provider(format!(
+                "{} returned {}: {}",
+                name, status, text
+            )));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamEvent>>(64);
+
+        tokio::spawn(async move {
+            let mut body = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut text = String::new();
+            let mut tcs: BTreeMap<usize, OpenAiToolCallAccum> = BTreeMap::new();
+
+            while let Some(chunk) = body.next().await {
+                let bytes = match chunk {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(RsmgoError::Provider(format!("stream error: {}", e))))
+                            .await;
+                        return;
+                    }
+                };
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event = buffer[..pos].to_string();
+                    buffer.drain(..pos + 2);
+                    let delta = apply_sse_event(&event, &mut tcs);
+                    if !delta.is_empty() {
+                        text.push_str(&delta);
+                        if tx
+                            .send(Ok(StreamEvent::Delta { text: delta }))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Flush any trailing partial event (e.g. a final line without a
+            // trailing blank line).
+            if !buffer.trim().is_empty() {
+                let delta = apply_sse_event(&buffer, &mut tcs);
+                if !delta.is_empty() {
+                    text.push_str(&delta);
+                    let _ = tx.send(Ok(StreamEvent::Delta { text: delta })).await;
+                }
+            }
+
+            let tool_calls: Vec<ToolCall> = tcs
+                .into_values()
+                .map(|acc| {
+                    let args = serde_json::from_str(&acc.arguments).unwrap_or(json!({}));
+                    ToolCall {
+                        id: acc.id,
+                        name: acc.name,
+                        arguments: args,
+                    }
+                })
+                .collect();
+
+            let response = ChatResponse {
+                session_id,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: text,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    parts: vec![],
+                },
+                tool_calls,
+                usage: Usage::default(),
+            };
+            let _ = tx.send(Ok(StreamEvent::Done { response })).await;
+        });
+
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {

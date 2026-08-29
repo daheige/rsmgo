@@ -17,7 +17,9 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Tool Usage](#tool-usage)
+- [Docker Deployment](#docker-deployment)
 - [Troubleshooting & Notes](#troubleshooting--notes)
+- [HTTP Debug API](#http-debug-api)
 - [Component Reference](#component-reference)
 - [Future Evolution](#future-evolution)
 - [License](#license)
@@ -290,10 +292,11 @@ By default the engine listens on:
 - gRPC: `127.0.0.1:50051`
 - HTTP: `127.0.0.1:8080`
 
-### 4. Run the Go control plane
+### 4. Build and run the Go control plane
 
 ```bash
-go run ./control/cmd/rsmgo-control
+go build -o rgo-control ./control/cmd/rsmgo-control
+./rgo-control
 ```
 
 By default the control plane listens on `0.0.0.0:9090`.
@@ -375,17 +378,23 @@ app:
 
 ### `engine`
 
-Engine listening addresses, data directory, and system prompt.
+Engine listening addresses, HTTP debug toggle, streaming toggle, data directory, and system prompt.
 
 ```yaml
 engine:
   grpc_addr: "127.0.0.1:50051"
   http_addr: "127.0.0.1:8080"
+  app_http_debug: true
+  chat_stream: true
   data_dir: "./share/rsmgo"
   system_prompt: |
     You are rsmgo, a model-agnostic AI agent assistant...
 ```
 
+- `grpc_addr`: gRPC listening address for the engine; this is the main channel used by the Go control plane.
+- `http_addr`: Listening address for the built-in HTTP/JSON debug API. It is only started when `app_http_debug` is `true`.
+- `app_http_debug`: Whether to start the HTTP debug API. When `false` (default) only gRPC is served, reducing exposed ports; when `true` both gRPC and HTTP are served for local debugging.
+- `chat_stream`: Whether assistant responses are streamed by default. When `true` (default), the frontend receives real-time SSE data for `/api/v1/sessions/:id/chat?stream=true`. When `false`, the control plane buffers the full response and returns it in a single SSE payload even if the frontend requests streaming. This setting also applies to the Rust engine's HTTP debug endpoint `/api/v1/chat/stream`.
 - `data_dir`: Directory for SQLite and related persistence files. Supports relative paths (e.g. `./share/rsmgo`) as well as `~` home-directory expansion (e.g. `~/.local/share/rsmgo`).
 - `system_prompt`: Prepended to the default system prompt. The final prompt becomes `{DEFAULT_SYSTEM_PROMPT}\n\n{system_prompt}`, so critical instructions (such as preserving `write_file` download links) are always present even when a custom prompt is configured.
 
@@ -548,6 +557,54 @@ Workspaces are stored as JSON files under `{data_dir}/workspaces/` (one file per
 
 ---
 
+## Docker Deployment
+
+The repository includes a [Dockerfile](Dockerfile) and [docker-entrypoint.sh](docker-entrypoint.sh) that run all core services. [docker-compose.yaml](docker-compose.yaml) mounts the project root [app.yaml](app.yaml) into the `engine` and `control` containers via `-v`, and overrides the cross-container addresses with environment variables:
+
+- `engine`: `RSMGO_GRPC_ADDR=0.0.0.0:50051`, `RSMGO_HTTP_ADDR=0.0.0.0:8080`
+- `control`: `RSMGO_ENGINE_ADDR=engine:50051`
+
+Common commands are wrapped in the [Makefile](Makefile):
+
+```bash
+# Build the image
+docker compose build
+
+# Start services (recommended: copy .env.example to .env and fill in your API key)
+cp .env.example .env
+# edit .env with the key for the provider you enable
+docker compose up -d
+
+# Or use the Makefile targets
+make docker-build
+make docker-run
+
+# Follow logs
+make docker-logs
+
+# Stop and remove containers
+make docker-stop
+```
+
+Then open http://localhost:1338.
+
+### Ports
+
+| Port | Service |
+|------|---------|
+| `1338` | Web UI |
+| `9090` | Go control plane |
+| `8080` | Rust engine HTTP debug API |
+| `50051` | Rust engine gRPC |
+
+### Data persistence and custom configuration
+
+Compose uses a Docker volume named `rsmgo-data`, mounted into both the `engine` and `control` containers at `/app/share/rsmgo`, to persist sessions, memory, and workspaces.
+
+The default `-v ./app.yaml:/app/app.yaml:ro` mount uses the project root `app.yaml`. To use a custom config, edit `app.yaml` directly; the container overrides the engine listen addresses and the control-plane engine address via environment variables, so you do not need to change `engine.grpc_addr` or `control_plane.engine_addr` manually.
+
+---
+
 ## Troubleshooting & Notes
 
 ### 1. Kimi / Moonshot returns 404 `resource_not_found_error`
@@ -580,6 +637,80 @@ Other vision options include OpenAI `gpt-4o`, Gemini `gemini-2.5-flash`, and Qwe
 ### 3. Ordinary questions trigger tool calls
 
 Tools are not enabled by default. When no tools are checked in the chat tool menu, the model receives no tool definitions and will answer directly. Tool calls only happen when you explicitly enable one or more tools and the model decides they are needed.
+
+---
+
+## HTTP Debug API
+
+In addition to gRPC (default `127.0.0.1:50051`), the engine exposes a small HTTP/JSON debug API (default `127.0.0.1:8080`). It binds directly to the same internal `Agent`, so the business logic is identical to gRPC; only the transport differs.
+
+> This HTTP service is for **debugging and local convenience only**. The main data path (Web/Desktop → Go control plane `:9090` → gRPC `:50051` → engine) does not use it, so disabling it has no impact on normal operation.
+
+### Toggle
+
+Enable it via `engine.app_http_debug` in `app.yaml`:
+
+```yaml
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  app_http_debug: true   # true: serve HTTP debug API; false: gRPC only
+```
+
+- `app_http_debug: false` (default): HTTP is not served; only gRPC listens, reducing exposed ports.
+- `app_http_debug: true`: Both gRPC and HTTP are served for local `curl` debugging and health checks.
+
+### Routes
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/health` | Health check returning `status` and `version` |
+| `POST` | `/api/v1/chat` | Direct JSON `ChatRequest` call to `Agent::chat` (no gRPC hop) |
+| `POST` | `/api/v1/chat/stream` | SSE streaming call to `Agent::chat_stream`; buffered into a single payload when `chat_stream: false` |
+| `GET` | `/api/v1/tools` | List registered tools and their definitions |
+| `GET` | `/api/v1/providers` | List configured provider names |
+
+### Examples
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Direct chat (request body matches `types::ChatRequest`):
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "debug-1",
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+Streaming chat (SSE):
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/api/v1/chat/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{
+    "session_id": "debug-1",
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+List tools and providers:
+
+```bash
+curl http://127.0.0.1:8080/api/v1/tools
+curl http://127.0.0.1:8080/api/v1/providers
+```
 
 ---
 
@@ -643,7 +774,6 @@ pnpm tauri build
 
 rsmgo is currently at the MVP stage. Planned directions include:
 
-- **Streaming responses**: Implement `ChatStream` gRPC/HTTP streaming so frontends can receive model output in real time.
 - **MCP support**: Adopt the Model Context Protocol to extend the tool ecosystem and external data sources.
 - **Richer tools**: Add network requests, database queries, Git operations, browser automation, and more.
 - **Multi-agent collaboration**: Task decomposition, sub-agent invocation, and result aggregation.
