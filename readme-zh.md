@@ -273,7 +273,7 @@ cd rsmgo
 
 ### 2. 配置 API 密钥
 
-复制 `app.exam.yaml` 为 `app.yaml`，并填写目标模型的 API Key：
+编辑 `app.yaml`（或复制 `app.exam.yaml` 为 `app.yaml`），配置你要使用的提供商。可以直接在文件中填写 API Key，也可以使用 `${VAR}` 占位符从环境变量读取：
 
 ```yaml
 providers:
@@ -286,10 +286,18 @@ providers:
         display_name: "DeepSeek V3"
 ```
 
-然后导出环境变量：
+如果使用占位符，在 shell 中导出对应变量（`.env` 文件只是可选方式，不是必需的）：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
+```
+
+也可以直接把 Key 写在 `app.yaml` 中：
+
+```yaml
+providers:
+  - name: deepseek
+    api_key: "sk-xxx"
 ```
 
 ### 3. 运行 Rust 引擎
@@ -373,7 +381,7 @@ cargo run -p rsmgo-cli -- run "用 Rust 写一个快速排序"
 
 ## 配置文件
 
-`app.yaml` 是 rsmgo 的唯一主配置，支持以下顶层节点：
+`app.yaml` 是 rsmgo 的唯一主配置。环境变量仅在 `app.yaml` 中作为 `${VAR}` 占位符被替换时使用；`.env` 文件是可选的，不是配置本体。支持以下顶层节点：
 
 ### `app`
 
@@ -586,8 +594,9 @@ Download: [Download my.md](/api/v1/files/my.md)
 # 构建镜像
 docker compose build
 
-# 启动服务（推荐：先复制 .env.example 为 .env 并填写 API Key）
-cp .env.example .env
+# 启动服务。如果 app.yaml 使用了 ${VAR} 占位符，可在 shell 中设置变量，
+# 或使用可选的 .env 文件（见 .env.example）。也可以直接把 Key 写入 app.yaml。
+# cp .env.example .env   # 可选，仅在你想用 .env 文件时
 # 编辑 .env，填写 DEEPSEEK_API_KEY 等实际使用的模型密钥
 docker compose up -d
 

@@ -18,6 +18,9 @@ services:
       # Override listening addresses so the engine is reachable from other containers.
       - RSMGO_GRPC_ADDR=0.0.0.0:50051
       - RSMGO_HTTP_ADDR=0.0.0.0:8080
+      # These variables are referenced by app.yaml via ${VAR} placeholders.
+      # They are not read directly by the engine; app.yaml remains the single
+      # source of configuration. You may remove keys for providers you do not enable.
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -39,6 +42,9 @@ services:
     environment:
       # Point the control plane at the engine service hostname inside Compose.
       - RSMGO_ENGINE_ADDR=engine:50051
+      # These variables are referenced by app.yaml via ${VAR} placeholders.
+      # They are not read directly by the control plane; app.yaml remains the
+      # single source of configuration. You may remove keys for providers you do not enable.
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

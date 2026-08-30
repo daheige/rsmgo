@@ -45,7 +45,7 @@ impl OpenAiCompatibleProvider {
         Self::new(
             "openai",
             "https://api.openai.com/v1".to_string(),
-            std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${OPENAI_API_KEY}
             "gpt-4o-mini",
             vec![
                 ModelInfo {
@@ -66,7 +66,7 @@ impl OpenAiCompatibleProvider {
         Self::new(
             "deepseek",
             "https://api.deepseek.com".to_string(),
-            std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${DEEPSEEK_API_KEY}
             "deepseek-chat",
             vec![
                 ModelInfo {
@@ -87,7 +87,7 @@ impl OpenAiCompatibleProvider {
         Self::new(
             "qwen",
             "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
-            std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${DASHSCOPE_API_KEY}
             "qwen-max",
             vec![
                 ModelInfo {
@@ -108,7 +108,7 @@ impl OpenAiCompatibleProvider {
         Self::new(
             "kimi",
             "https://api.moonshot.cn/v1".to_string(),
-            std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${MOONSHOT_API_KEY}
             "moonshot-v1-8k",
             vec![
                 ModelInfo {
@@ -139,7 +139,7 @@ impl OpenAiCompatibleProvider {
         Self::new(
             "gemini",
             "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
-            std::env::var("GEMINI_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${GEMINI_API_KEY}
             "gemini-2.5-flash",
             vec![
                 ModelInfo {

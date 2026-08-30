@@ -148,22 +148,107 @@ impl AppConfig {
 }
 
 fn expand_env_vars(content: &str) -> String {
-    let mut result = content.to_string();
-    // Simple ${VAR} expansion.
-    loop {
-        let start = match result.find("${") {
-            Some(i) => i,
-            None => break,
-        };
-        let end = match result[start + 2..].find('}') {
-            Some(i) => start + 2 + i,
-            None => break,
-        };
-        let var_name = &result[start + 2..end];
-        let value = std::env::var(var_name).unwrap_or_default();
-        result.replace_range(start..=end, &value);
+    let mut result = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            if let Some(&'{') = chars.peek() {
+                chars.next(); // consume '{'
+                let mut var = String::new();
+                let mut closed = false;
+                for c in chars.by_ref() {
+                    if c == '}' {
+                        closed = true;
+                        break;
+                    }
+                    var.push(c);
+                }
+                if closed && !var.is_empty() {
+                    result.push_str(&std::env::var(&var).unwrap_or_default());
+                } else {
+                    // Not a valid ${VAR} placeholder; keep the literal text.
+                    result.push('$');
+                    result.push('{');
+                    result.push_str(&var);
+                }
+            } else {
+                result.push('$');
+            }
+        } else {
+            result.push(ch);
+        }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_env(var: &str, value: &str) {
+        std::env::set_var(var, value);
+    }
+
+    fn remove_env(var: &str) {
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn expands_braced_var() {
+        set_env("RSMGO_TEST_BRACED", "braced_value");
+        let input = "key: \"${RSMGO_TEST_BRACED}\"";
+        let output = expand_env_vars(input);
+        assert_eq!(output, "key: \"braced_value\"");
+        remove_env("RSMGO_TEST_BRACED");
+    }
+
+    #[test]
+    fn leaves_bare_dollar_alone() {
+        let input = "price: $100";
+        let output = expand_env_vars(input);
+        assert_eq!(output, "price: $100");
+    }
+
+    #[test]
+    fn missing_var_expands_to_empty() {
+        remove_env("RSMGO_TEST_MISSING");
+        let input = "key: \"${RSMGO_TEST_MISSING}\"";
+        let output = expand_env_vars(input);
+        assert_eq!(output, "key: \"\"");
+    }
+
+    #[test]
+    fn load_config_expands_provider_api_key() {
+        set_env("RSMGO_TEST_API_KEY", "secret_key_123");
+        let yaml = r#"
+app:
+  name: test
+  version: 0.0.0
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  data_dir: "./share/rsmgo"
+providers:
+  - name: deepseek
+    api_key: "${RSMGO_TEST_API_KEY}"
+    base_url: "https://api.deepseek.com"
+    default_model: "deepseek-chat"
+    models:
+      - id: "deepseek-chat"
+        display_name: "DeepSeek Chat"
+tools:
+  enabled: []
+control_plane:
+  addr: ":9090"
+  engine_addr: "127.0.0.1:50051"
+"#;
+        let expanded = expand_env_vars(yaml);
+        let config: AppConfig = serde_yaml::from_str(&expanded).unwrap();
+        let entry = config.find_provider("deepseek").unwrap();
+        assert_eq!(entry.api_key, "secret_key_123");
+        remove_env("RSMGO_TEST_API_KEY");
+    }
 }
 
 fn expand_tilde(path: &str) -> String {

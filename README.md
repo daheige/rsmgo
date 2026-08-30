@@ -263,7 +263,7 @@ cd rsmgo
 
 ### 2. Configure API keys
 
-Copy `app.exam.yaml` to `app.yaml` and fill in the API key for your chosen model:
+Edit `app.yaml` (or copy `app.exam.yaml` to `app.yaml`) and configure the provider you want to use. You can either put the API key directly in the file or use a `${VAR}` placeholder to read it from an environment variable:
 
 ```yaml
 providers:
@@ -276,10 +276,18 @@ providers:
         display_name: "DeepSeek V3"
 ```
 
-Then export the environment variable:
+If you use a placeholder, export the variable in your shell (or use any other way to set environment variables; `.env` files are optional):
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
+```
+
+You can also write the key directly in `app.yaml`:
+
+```yaml
+providers:
+  - name: deepseek
+    api_key: "sk-xxx"
 ```
 
 ### 3. Run the Rust engine
@@ -364,7 +372,7 @@ Screenshot:
 
 ## Configuration
 
-`app.yaml` is the single source of runtime configuration. It supports the following top-level sections.
+`app.yaml` is the single source of runtime configuration. Environment variables are used only for `${VAR}` placeholder substitution inside `app.yaml`; `.env` files are optional. The following top-level sections are supported.
 
 ### `app`
 
@@ -570,8 +578,10 @@ Common commands are wrapped in the [Makefile](Makefile):
 # Build the image
 docker compose build
 
-# Start services (recommended: copy .env.example to .env and fill in your API key)
-cp .env.example .env
+# Start services. If your app.yaml uses ${VAR} placeholders, set the variables
+# in your shell or use an optional .env file (see .env.example). You can also
+# put API keys directly into app.yaml.
+# cp .env.example .env   # optional, only if you prefer a .env file
 # edit .env with the key for the provider you enable
 docker compose up -d
 

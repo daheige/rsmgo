@@ -40,7 +40,7 @@ impl AnthropicProvider {
     pub fn default() -> Self {
         Self::new(
             "https://api.anthropic.com/v1".to_string(),
-            std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+            "".to_string(), // configured via app.yaml using ${ANTHROPIC_API_KEY}
             "claude-sonnet-4-5-20251001",
             vec![
                 ModelInfo {
