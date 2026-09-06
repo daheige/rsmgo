@@ -1,5 +1,6 @@
 use crate::error::{Result, RsmgoError};
 use crate::tools::{Tool, ToolContext};
+use async_trait::async_trait;
 use serde_json::json;
 use std::process::Command;
 
@@ -31,6 +32,7 @@ fn fetch(url: &str) -> Result<String> {
 
 pub struct WebSearchTool;
 
+#[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
@@ -50,7 +52,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'query' argument".to_string()))?;
@@ -80,6 +82,7 @@ impl Tool for WebSearchTool {
 
 pub struct FetchUrlTool;
 
+#[async_trait]
 impl Tool for FetchUrlTool {
     fn name(&self) -> &str {
         "fetch_url"
@@ -99,7 +102,7 @@ impl Tool for FetchUrlTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'url' argument".to_string()))?;

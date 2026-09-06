@@ -40,6 +40,7 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - **Stop generation**: Stop an in-flight chat from the UI — the frontend aborts the request and asks the control plane to cancel the engine-side generation.
 - **Rich rendering & message actions**: Assistant replies are rendered as Markdown with per-language syntax-highlighted code blocks and one-click copy; each assistant message has a copy button, and the last message offers a regenerate button to re-run the previous answer in place.
 - **Workspaces**: Add and manage local directory workspaces from the sidebar, each with a per-tool permission list. When a session selects a workspace, the agent reads and writes directly inside that directory (its true working directory) and is restricted to the workspace's allowed tools; without a workspace, files fall back to the default `outputs/` directory with a download link.
+- **MCP protocol support**: Two-way Model Context Protocol integration. As an MCP client, the engine imports tools from external MCP servers (stdio or Streamable HTTP) and registers them as `mcp__{server}__{tool}` tools; as an MCP server, the Go control plane exposes the engine's full tool set to external MCP clients over stdio (`rsmgo-control mcp`) or HTTP (`/mcp`).
 - **Environment-aware configuration**: `app.yaml` supports `${VAR}` environment variable expansion and `~` home-directory shorthand for flexible deployment.
 
 ---
@@ -52,26 +53,33 @@ graph TD
         A["rsmgo CLI"]
         B["Web (Next.js)"]
         C["Desktop (Tauri + WebView)"]
+        J["External MCP Clients<br/>Claude Desktop / Inspector"]
     end
 
-    D["Go Control Plane<br/>control :9090"]
+    D["Go Control Plane<br/>control :9090<br/>MCP server :9090/mcp"]
 
     subgraph Engine["Rust Engine Layer rsmgo-core"]
         E["gRPC :50051 / HTTP :8080"]
         F["Agent Orchestration"]
         G["Providers<br/>OpenAI / Anthropic / DeepSeek / Qwen / Kimi"]
-        H["Tools<br/>read_file / write_file / execute_command / list_directory / search"]
+        H["Tools<br/>built-in + imported mcp__* tools"]
         I[(Memory<br/>SQLite)]
+        K["MCP Client<br/>rmcp 3.2.0"]
     end
+
+    L["External MCP Servers<br/>stdio / Streamable HTTP"]
 
     A -->|Direct| F
     B -->|HTTP/JSON| D
     C -->|HTTP/JSON| D
+    J -->|stdio / HTTP MCP| D
     D -->|gRPC| E
     E --> F
     F --> G
     F --> H
     F --> I
+    K -->|stdio / HTTP MCP| L
+    F --> K
 ```
 
 ### Design Highlights
@@ -83,11 +91,13 @@ graph TD
    - For OpenAI-compatible models that emit tool calls as DSML/XML inside `content`, the engine parses the markup, executes the tools, and strips the raw markup from the reply shown to the user.
    - `ProviderRegistry` supports registering multiple providers at runtime. Anthropic uses its native protocol; everything else is treated as OpenAI-compatible.
    - `MemoryStore` provides transactional session and message storage via `rusqlite`.
+   - The `mcp` module implements an MCP client on rmcp 3.2.0: at startup it connects to external servers listed in `mcp_servers` (stdio child processes / Streamable HTTP), wraps their tools as `mcp__{server}__{tool}`, and registers them in the same tool registry and execution path as built-in tools. A server that fails to connect is logged and skipped without blocking startup.
 
 2. **Control plane (`control`, Go)**
    - Acts as a gateway between frontends and the engine, exposing a unified RESTful API under `/api/v1/*`.
    - Responsible for session CRUD, workspace management, chat cancellation, message forwarding, health checks, and CORS.
    - Communicates with the Rust engine through a gRPC client.
+   - The `mcp` package implements an MCP server on modelcontextprotocol/go-sdk: it fetches the engine's tool list at startup, registers a proxy handler per tool, and exposes them over `rsmgo-control mcp` (stdio) or `/mcp` (Streamable HTTP) to external MCP clients.
 
 3. **Frontend layer**
    - **Web**: Chat interface built with Next.js 16 and React 19. `next.config.js` rewrites `/api/*` to the control plane. The UI offers a stop button to cancel in-flight generation and a sidebar for managing local workspace directories.
@@ -107,6 +117,7 @@ graph TD
 | **Control-plane gateway** | Go + Gin | Go is mature and efficient for cloud-native gateways, HTTP routing, and concurrency; Gin is lightweight and widely adopted. |
 | **Inter-service communication** | gRPC + Protocol Buffers | Efficient RPC between the control plane and engine; Protobuf offers strongly typed, cross-language interface contracts. |
 | **Persistence** | SQLite (via `rusqlite`) | Lightweight, zero-config storage for local sessions and message history without requiring a separate database service. |
+| **MCP integration** | rmcp 3.2.0 (Rust) / modelcontextprotocol/go-sdk (Go) | Two-way Model Context Protocol support: the Rust engine acts as an MCP client importing external tools, while the Go control plane acts as an MCP server exposing the tool set. |
 | **Web frontend** | Next.js 16 + React 19 + TypeScript | Modern React full-stack framework with App Router, SSR, and a great developer experience. |
 | **Desktop client** | Tauri 2 | Embeds the frontend via the system WebView, yielding smaller bundles and lower resource usage than Electron. |
 | **Configuration** | YAML + `serde_yaml` | Human-readable config format with support for environment-variable expansion and home-directory shorthand. |
@@ -132,6 +143,7 @@ rsmgo/
 │   │   │   ├── agent/         # Agent orchestration logic
 │   │   │   ├── config/        # app.yaml loading and parsing
 │   │   │   ├── memory/        # SQLite memory store
+│   │   │   ├── mcp/           # MCP client (rmcp: stdio / HTTP tool import)
 │   │   │   ├── providers/     # LLM provider abstraction and implementations
 │   │   │   ├── server.rs      # gRPC + HTTP server
 │   │   │   ├── tools/         # Tool registry and built-in tools
@@ -149,6 +161,7 @@ rsmgo/
 │       ├── api/               # HTTP API and routing
 │       ├── config/            # Go-side configuration loading
 │       ├── engine/            # gRPC engine client
+│       ├── mcp/               # MCP server (go-sdk: stdio subcommand + /mcp HTTP)
 │       ├── session/           # Session file storage
 │       └── workspace/         # Workspace directory storage
 ├── pb/                        # Generated Go protobuf code
@@ -447,6 +460,31 @@ tools:
     - fetch_url
 ```
 
+### `mcp_servers`
+
+External MCP servers to connect to. Tools from each server are imported into the engine and appear in the frontend tool menu as `mcp__{server}__{tool}`. Two transports are supported:
+
+- `stdio`: spawn a local command and speak MCP over its stdin/stdout.
+- `http`: connect to a remote Streamable HTTP MCP endpoint.
+
+```yaml
+mcp_servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      NODE_ENV: production
+
+  - name: remote
+    transport: http
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer ${MCP_API_KEY}"
+```
+
+A server that fails to connect is logged and skipped; it never blocks engine startup. Restart the engine after changing this list.
+
 ### `control_plane`
 
 Go control-plane listening address and engine address.
@@ -485,6 +523,31 @@ Tools require two steps to become active:
 | `search` | Recursively search for files by name pattern using `find`. | `directory`: search directory; `pattern`: filename pattern, e.g. `*.rs` |
 | `web_search` | Search the web. | `query`: search query |
 | `fetch_url` | Fetch and return the text content of a URL. | `url`: target URL |
+
+### MCP tools (importing external tools)
+
+Any tool imported from an MCP server configured in `mcp_servers` behaves like a built-in tool: it appears in the frontend tool menu (prefixed with the server name) and can be enabled per chat. Naming follows `mcp__{server}__{tool}`, e.g. a `read_file` tool from a server named `filesystem` is registered as `mcp__filesystem__read_file`.
+
+### Exposing rsmgo as an MCP server
+
+The Go control plane can itself act as an MCP server, proxying the engine's entire tool set (including imported MCP tools) to external MCP clients:
+
+- **stdio**: run `rsmgo-control mcp` and point an MCP client at it. For example, in Claude Desktop's configuration:
+
+  ```json
+  {
+    "mcpServers": {
+      "rsmgo": {
+        "command": "/path/to/rsmgo-control",
+        "args": ["mcp"]
+      }
+    }
+  }
+  ```
+
+- **Streamable HTTP**: the control plane serves MCP at `POST http://<control-plane>:9090/mcp`, suitable for remote MCP clients and the MCP Inspector.
+
+Tool definitions are fetched from the engine once at control-plane startup; restart the control plane if the engine's tool set changes.
 
 ### Example
 
@@ -733,6 +796,7 @@ curl http://127.0.0.1:8080/api/v1/providers
 | `agent` | Agent orchestration: request lifecycle, tool-call loop, and memory writes. |
 | `config` | `app.yaml` parsing with environment variable and path expansion. |
 | `memory` | SQLite-based session and message persistence. |
+| `mcp` | MCP client (rmcp 3.2.0): connects to external MCP servers (stdio / Streamable HTTP) and registers their tools as `mcp__{server}__{tool}`. |
 | `providers` | LLM provider trait, `OpenAiCompatibleProvider`, `AnthropicProvider`, and registry. |
 | `server` | gRPC Engine service and Axum HTTP routes. |
 | `tools` | Tool trait, registry, and built-in tool implementations. |
@@ -749,6 +813,7 @@ See the [Tool Usage](#tool-usage) section for the full list of built-in tools, t
 | `api` | Gin HTTP service, RESTful routes, CORS, and session endpoints. |
 | `config` | Reads `app.yaml` and extracts control-plane-specific fields. |
 | `engine` | gRPC client wrapper for communicating with the Rust engine. |
+| `mcp` | MCP server (modelcontextprotocol/go-sdk): proxies engine tools to external MCP clients over stdio (`rsmgo-control mcp`) and Streamable HTTP (`/mcp`). |
 | `session` | Lightweight local JSON file store for sessions. |
 | `workspace` | Lightweight local JSON file store for workspace directories. |
 
@@ -784,7 +849,7 @@ pnpm tauri build
 
 rsmgo is currently at the MVP stage. Planned directions include:
 
-- **MCP support**: Adopt the Model Context Protocol to extend the tool ecosystem and external data sources.
+- **Enhanced MCP capabilities**: Hot-reload of MCP tool definitions (no control-plane restart when the engine tool set changes), plus MCP resources and prompt templates.
 - **Richer tools**: Add network requests, database queries, Git operations, browser automation, and more.
 - **Multi-agent collaboration**: Task decomposition, sub-agent invocation, and result aggregation.
 - **Enhanced memory**: Vector retrieval and long-term memory summarization for better cross-session continuity.

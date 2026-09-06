@@ -105,6 +105,12 @@ func (s *Server) registerRoutes() {
 	s.router.GET("/api/v1/workspaces/:id/files/:name", s.downloadWorkspaceFile)
 }
 
+// MountMCP attaches a Streamable HTTP MCP endpoint at /mcp, exposing the
+// engine's tool set to external MCP clients.
+func (s *Server) MountMCP(handler http.Handler) {
+	s.router.Any("/mcp", gin.WrapH(handler))
+}
+
 func (s *Server) Run(addr string) error {
 	// Use a custom http.Server with generous timeouts so long-running chat
 	// requests (model API calls, tool execution loops) are not cut off by the

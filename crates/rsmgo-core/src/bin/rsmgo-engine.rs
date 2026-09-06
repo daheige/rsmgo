@@ -26,6 +26,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // instructions (e.g. preserving write_file download links) are not lost.
         agent = agent.with_system_prompt(format!("{}\n\n{}", DEFAULT_SYSTEM_PROMPT, prompt));
     }
+
+    // Connect to external MCP servers and import their tools. A server that
+    // fails to connect is logged and skipped; the manager must outlive the
+    // server loop since it holds the client connections open.
+    let (mcp_manager, mcp_tools) =
+        rsmgo_core::mcp::McpManager::connect_all(&config.mcp_servers).await;
+    for server in mcp_manager.servers() {
+        tracing::info!(
+            server = %server.name,
+            transport = %server.transport,
+            tools = ?server.tools,
+            "MCP tools imported"
+        );
+    }
+    for tool in mcp_tools {
+        agent.register_tool(tool);
+    }
+
     let agent = Arc::new(agent);
 
     let grpc_addr: SocketAddr = config.engine.grpc_addr.parse()?;

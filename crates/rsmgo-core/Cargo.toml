@@ -29,6 +29,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
+rmcp = { workspace = true }
+http = { workspace = true }
 
 [[bin]]
 name = "rsmgo-engine"

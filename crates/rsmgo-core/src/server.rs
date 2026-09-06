@@ -227,13 +227,27 @@ impl Engine for EngineService {
 
     async fn execute_tool(
         &self,
-        _request: Request<ExecuteToolRequest>,
+        request: Request<ExecuteToolRequest>,
     ) -> std::result::Result<Response<ExecuteToolResponse>, Status> {
-        Ok(Response::new(ExecuteToolResponse {
-            success: false,
-            output: "".to_string(),
-            error: "not implemented".to_string(),
-        }))
+        let req = request.into_inner();
+        let args: serde_json::Value =
+            serde_json::from_str(&req.arguments).unwrap_or(serde_json::Value::Null);
+        match self
+            .agent
+            .execute_tool(&req.name, args, &crate::tools::ToolContext::default())
+            .await
+        {
+            Ok(output) => Ok(Response::new(ExecuteToolResponse {
+                success: true,
+                output,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(ExecuteToolResponse {
+                success: false,
+                output: String::new(),
+                error: e.to_string(),
+            })),
+        }
     }
 
     async fn list_tools(

@@ -1,5 +1,6 @@
 use crate::error::{Result, RsmgoError};
 use crate::tools::{Tool, ToolContext};
+use async_trait::async_trait;
 use serde_json::json;
 use std::fs;
 use std::io::Read;
@@ -26,6 +27,7 @@ fn percent_encode_filename(name: &str) -> String {
 
 pub struct ReadFileTool;
 
+#[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         "read_file"
@@ -45,7 +47,7 @@ impl Tool for ReadFileTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'path' argument".to_string()))?;
@@ -66,6 +68,7 @@ impl WriteFileTool {
     }
 }
 
+#[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
         "write_file"
@@ -86,7 +89,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .or_else(|| args["file_path"].as_str())
@@ -163,6 +166,7 @@ impl Tool for WriteFileTool {
 
 pub struct ExecuteCommandTool;
 
+#[async_trait]
 impl Tool for ExecuteCommandTool {
     fn name(&self) -> &str {
         "execute_command"
@@ -183,7 +187,7 @@ impl Tool for ExecuteCommandTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'command' argument".to_string()))?;
@@ -251,6 +255,7 @@ impl Tool for ExecuteCommandTool {
 
 pub struct ListDirectoryTool;
 
+#[async_trait]
 impl Tool for ListDirectoryTool {
     fn name(&self) -> &str {
         "list_directory"
@@ -270,7 +275,7 @@ impl Tool for ListDirectoryTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'path' argument".to_string()))?;
@@ -300,6 +305,7 @@ impl Tool for ListDirectoryTool {
 
 pub struct SearchTool;
 
+#[async_trait]
 impl Tool for SearchTool {
     fn name(&self) -> &str {
         "search"
@@ -320,7 +326,7 @@ impl Tool for SearchTool {
         })
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let directory = args["directory"]
             .as_str()
             .ok_or_else(|| RsmgoError::Tool("missing 'directory' argument".to_string()))?;
@@ -351,29 +357,29 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn write_file_tool_rejects_traversal() {
+    #[tokio::test]
+    async fn write_file_tool_rejects_traversal() {
         let workspace = temp_workspace("traversal");
         let tool = WriteFileTool::new(&workspace);
         let args = json!({
             "path": "../secret.txt",
             "content": "should not be written"
         });
-        let result = tool.execute(args, &ToolContext::default());
+        let result = tool.execute(args, &ToolContext::default()).await;
         assert!(result.is_err(), "path with .. should be rejected");
         assert!(!workspace.parent().unwrap().join("secret.txt").exists());
         let _ = fs::remove_dir_all(&workspace);
     }
 
-    #[test]
-    fn write_file_tool_writes_to_outputs() {
+    #[tokio::test]
+    async fn write_file_tool_writes_to_outputs() {
         let workspace = temp_workspace("outputs");
         let tool = WriteFileTool::new(&workspace);
         let args = json!({
             "path": "reports/summary.md",
             "content": "hello"
         });
-        let result = tool.execute(args, &ToolContext::default()).unwrap();
+        let result = tool.execute(args, &ToolContext::default()).await.unwrap();
         assert!(result.contains("outputs/reports/summary.md"));
         assert!(result.contains("[Download summary.md](/api/v1/files/summary.md)"));
         assert_eq!(
@@ -383,21 +389,21 @@ mod tests {
         let _ = fs::remove_dir_all(&workspace);
     }
 
-    #[test]
-    fn write_file_tool_url_encodes_filename() {
+    #[tokio::test]
+    async fn write_file_tool_url_encodes_filename() {
         let workspace = temp_workspace("encode");
         let tool = WriteFileTool::new(&workspace);
         let args = json!({
             "path": "my file.md",
             "content": "hello"
         });
-        let result = tool.execute(args, &ToolContext::default()).unwrap();
+        let result = tool.execute(args, &ToolContext::default()).await.unwrap();
         assert!(result.contains("[Download my file.md](/api/v1/files/my%20file.md)"));
         let _ = fs::remove_dir_all(&workspace);
     }
 
-    #[test]
-    fn write_file_tool_writes_into_workspace() {
+    #[tokio::test]
+    async fn write_file_tool_writes_into_workspace() {
         let data_dir = temp_workspace("ws-default");
         let ws_dir = temp_workspace("ws-target");
         let tool = WriteFileTool::new(&data_dir);
@@ -406,7 +412,7 @@ mod tests {
             workspace_id: Some("ws-1".to_string()),
         };
         let args = json!({ "path": "notes/todo.md", "content": "buy milk" });
-        let result = tool.execute(args, &ctx).unwrap();
+        let result = tool.execute(args, &ctx).await.unwrap();
         // In workspace mode the file lands directly in the workspace (not under
         // outputs/) and no download link is emitted.
         assert!(result.contains("File written: notes/todo.md"));
@@ -420,8 +426,8 @@ mod tests {
         let _ = fs::remove_dir_all(&ws_dir);
     }
 
-    #[test]
-    fn write_file_tool_rebases_absolute_path_into_workspace() {
+    #[tokio::test]
+    async fn write_file_tool_rebases_absolute_path_into_workspace() {
         let data_dir = temp_workspace("ws-abs-default");
         let ws_dir = temp_workspace("ws-abs-target");
         let tool = WriteFileTool::new(&data_dir);
@@ -436,7 +442,7 @@ mod tests {
             "path": ws_dir.join("demo/server.js").to_string_lossy(),
             "content": "console.log('hi')"
         });
-        let result = tool.execute(args, &ctx).unwrap();
+        let result = tool.execute(args, &ctx).await.unwrap();
         assert!(result.contains("File written: demo/server.js"));
         assert_eq!(
             fs::read_to_string(ws_dir.join("demo/server.js")).unwrap(),

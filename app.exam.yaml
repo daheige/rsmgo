@@ -112,6 +112,11 @@ tools:
     - web_search
     - fetch_url
 
+# External MCP servers whose tools are imported into the agent (named
+# mcp__{server}__{tool}). stdio spawns a local command; http connects to a
+# remote Streamable HTTP endpoint.
+mcp_servers: []
+
 control_plane:
   addr: ":9090"
   engine_addr: "127.0.0.1:50051"

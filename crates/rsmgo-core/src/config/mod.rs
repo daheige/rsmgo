@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
+    pub mcp_servers: Vec<McpServerEntry>,
+    #[serde(default)]
     pub control_plane: ControlPlaneConfig,
 }
 
@@ -68,6 +70,30 @@ pub struct ModelEntry {
 pub struct ToolsConfig {
     #[serde(default)]
     pub enabled: Vec<String>,
+}
+
+/// An external MCP server whose tools are imported into the agent's tool
+/// registry. `transport` is either `stdio` (spawn a local command and speak
+/// MCP over its standard input/output) or `http` (connect to a remote
+/// Streamable HTTP MCP endpoint).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    pub name: String,
+    #[serde(default)]
+    pub transport: String,
+    /// Command to spawn; required for `stdio` transport.
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Endpoint URL; required for `http` transport.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Extra HTTP headers sent on every request (http transport only).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -216,6 +242,71 @@ mod tests {
         let input = "key: \"${RSMGO_TEST_MISSING}\"";
         let output = expand_env_vars(input);
         assert_eq!(output, "key: \"\"");
+    }
+
+    #[test]
+    fn load_config_parses_mcp_servers() {
+        let yaml = r#"
+app:
+  name: test
+  version: 0.0.0
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  data_dir: "./share/rsmgo"
+providers: []
+mcp_servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      NODE_ENV: production
+  - name: remote
+    transport: http
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer token123"
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+
+        let fs = &config.mcp_servers[0];
+        assert_eq!(fs.name, "filesystem");
+        assert_eq!(fs.transport, "stdio");
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert_eq!(
+            fs.args,
+            ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        );
+        assert_eq!(
+            fs.env.get("NODE_ENV").map(String::as_str),
+            Some("production")
+        );
+
+        let remote = &config.mcp_servers[1];
+        assert_eq!(remote.transport, "http");
+        assert_eq!(remote.url.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(
+            remote.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token123")
+        );
+    }
+
+    #[test]
+    fn mcp_servers_defaults_to_empty() {
+        let yaml = r#"
+app:
+  name: test
+  version: 0.0.0
+engine:
+  grpc_addr: "127.0.0.1:50051"
+  http_addr: "127.0.0.1:8080"
+  data_dir: "./share/rsmgo"
+providers: []
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.mcp_servers.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::error::{Result, RsmgoError};
 use crate::memory::MemoryStore;
 use crate::providers::{default_registry, ProviderRef, ProviderRegistry};
-use crate::tools::{ToolContext, ToolDefinition, ToolRegistry};
+use crate::tools::{Tool, ToolContext, ToolDefinition, ToolRegistry};
 use crate::types::{ChatRequest, ChatResponse, Message, StreamEvent, ToolCall};
 use futures::{Stream, StreamExt};
 use std::path::PathBuf;
@@ -61,6 +61,23 @@ impl Agent {
 
     pub fn list_tools(&self) -> Vec<&str> {
         self.tools.list()
+    }
+
+    /// Register an additional tool at runtime (e.g. tools imported from
+    /// external MCP servers).
+    pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
+        self.tools.register(tool);
+    }
+
+    /// Execute a single tool by name with the given context, returning its
+    /// textual output. Used by the ExecuteTool RPC and the HTTP debug API.
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String> {
+        self.tools.execute(name, args, ctx).await
     }
 
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -211,7 +228,8 @@ impl Agent {
             for tc in &response.tool_calls {
                 let result = self
                     .tools
-                    .execute(&tc.name, tc.arguments.clone(), &tool_ctx);
+                    .execute(&tc.name, tc.arguments.clone(), &tool_ctx)
+                    .await;
                 let content = match result {
                     Ok(out) => {
                         tracing::info!(tool = %tc.name, "tool executed successfully");
@@ -340,7 +358,8 @@ impl Agent {
                 for tc in &response.tool_calls {
                     let result = this
                         .tools
-                        .execute(&tc.name, tc.arguments.clone(), &tool_ctx);
+                        .execute(&tc.name, tc.arguments.clone(), &tool_ctx)
+                        .await;
                     let content = match result {
                         Ok(out) => out,
                         Err(e) => format!("Error: {}", e),

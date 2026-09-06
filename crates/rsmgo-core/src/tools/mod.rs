@@ -1,5 +1,6 @@
 use crate::error::{Result, RsmgoError};
 pub use crate::types::ToolDefinition;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -43,11 +44,12 @@ impl ToolContext {
     }
 }
 
+#[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String>;
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String>;
 }
 
 impl ToolDefinition {
@@ -90,7 +92,7 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn execute(
+    pub async fn execute(
         &self,
         name: &str,
         args: serde_json::Value,
@@ -100,7 +102,7 @@ impl ToolRegistry {
             .tools
             .get(name)
             .ok_or_else(|| RsmgoError::Tool(format!("tool '{}' not found", name)))?;
-        tool.execute(args, ctx)
+        tool.execute(args, ctx).await
     }
 }
 

@@ -8,6 +8,9 @@ pub enum RsmgoError {
     #[error("tool error: {0}")]
     Tool(String),
 
+    #[error("mcp error: {0}")]
+    Mcp(String),
+
     #[error("memory error: {0}")]
     Memory(String),
 

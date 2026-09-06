@@ -40,6 +40,7 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - **停止生成**：在界面中停止进行中的对话——前端中止请求，并通知控制面取消引擎侧的生成。
 - **富文本渲染与消息操作**：助手回复以 Markdown 渲染，代码块按语言自动语法高亮并提供一键复制；每条助手消息带复制按钮，最后一条消息带「重新生成」按钮，可原地重跑上一次回答。
 - **工作区**：在侧边栏添加并管理本地目录工作区，每个工作区可勾选允许使用的工具（工具级权限）。会话选择了工作区时，Agent 直接在该目录内读写（把它当作真正的工作目录），且仅能调用该工作区允许的工具；未设置工作区时，文件退回默认 `outputs/` 目录并提供下载链接。
+- **MCP 协议支持**：双向接入 Model Context Protocol。作为 MCP 客户端，引擎从外部 MCP server（stdio 或 Streamable HTTP）导入工具，注册为 `mcp__{server}__{tool}` 工具；作为 MCP 服务端，Go 控制面通过 stdio（`rsmgo-control mcp`）或 HTTP（`/mcp`）把引擎的全部工具暴露给外部 MCP 客户端。
 - **环境感知配置**：`app.yaml` 支持 `${VAR}` 环境变量展开与 `~` 主目录简写，便于不同环境部署。
 
 ---
@@ -52,26 +53,33 @@ graph TD
         A["rsmgo CLI"]
         B["Web (Next.js)"]
         C["Desktop (Tauri + WebView)"]
+        J["外部 MCP 客户端<br/>Claude Desktop / Inspector"]
     end
 
-    D["Go Control Plane<br/>control :9090"]
+    D["Go Control Plane<br/>control :9090<br/>MCP server :9090/mcp"]
 
     subgraph Engine["Rust 引擎层 rsmgo-core"]
         E["gRPC :50051 / HTTP :8080"]
         F["Agent 编排"]
         G["Providers<br/>OpenAI / Anthropic / DeepSeek / Qwen / Kimi"]
-        H["Tools<br/>read_file / write_file / execute_command / list_directory / search"]
+        H["Tools<br/>内置工具 + mcp__* 导入工具"]
         I[(Memory<br/>SQLite)]
+        K["MCP Client<br/>rmcp 3.2.0"]
     end
+
+    L["外部 MCP Server<br/>stdio / Streamable HTTP"]
 
     A -->|直接调用| F
     B -->|HTTP/JSON| D
     C -->|HTTP/JSON| D
+    J -->|stdio / HTTP MCP| D
     D -->|gRPC| E
     E --> F
     F --> G
     F --> H
     F --> I
+    K -->|stdio / HTTP MCP| L
+    F --> K
 ```
 
 ### 设计要点
@@ -83,11 +91,13 @@ graph TD
    - 对于把工具调用以 DSML/XML 形式写入 `content` 的 OpenAI 兼容模型，引擎会解析该 markup、执行对应工具，并把原始 markup 从最终回复中剥离。
    - `ProviderRegistry` 支持运行时注册多家模型；Anthropic 走原生协议，其余默认按 OpenAI 兼容协议处理。
    - `MemoryStore` 基于 `rusqlite` 提供事务化会话与消息存储。
+   - `mcp` 模块基于 rmcp 3.2.0 实现 MCP 客户端：启动时按 `mcp_servers` 配置连接外部 server（stdio 子进程 / Streamable HTTP），把外部工具统一包装为 `mcp__{server}__{tool}` 注册进工具表，与内置工具走同一套执行链路；连接失败仅告警跳过，不阻塞启动。
 
 2. **控制面（control，Go）**
    - 作为前端与引擎之间的网关，统一暴露 RESTful API（`/api/v1/*`）。
    - 负责会话的 CRUD、工作区管理、会话取消、消息转发、健康检查与跨域支持。
    - 通过 gRPC 客户端与 Rust 引擎通信。
+   - `mcp` 包基于 modelcontextprotocol/go-sdk 实现 MCP 服务端：启动时从引擎拉取工具列表并注册代理工具，通过 `rsmgo-control mcp`（stdio）或 `/mcp`（Streamable HTTP）暴露给外部 MCP 客户端。
 
 3. **前端层**
    - **Web**：基于 Next.js 16 + React 19 的聊天界面，通过 `next.config.js` 的 rewrites 将 `/api/*` 代理到控制面。界面提供停止按钮以取消进行中的生成，以及侧边栏用于管理本地工作区目录。
@@ -107,6 +117,7 @@ graph TD
 | **控制面网关** | Go + Gin | Go 在云原生网关、HTTP 路由、并发处理方面成熟高效，Gin 框架轻量且社区活跃。 |
 | **进程间通信** | gRPC + Protocol Buffers | 控制面与引擎之间采用 gRPC 高效通信，Protobuf 提供强类型、跨语言的接口契约。 |
 | **持久化** | SQLite (rusqlite) | 轻量零配置，足以支撑本地会话与消息历史存储，无需额外数据库服务。 |
+| **MCP 接入** | rmcp 3.2.0 (Rust) / modelcontextprotocol/go-sdk (Go) | 双向接入 Model Context Protocol：Rust 引擎作为 MCP 客户端导入外部工具，Go 控制面作为 MCP 服务端对外暴露工具。 |
 | **Web 前端** | Next.js 16 + React 19 + TypeScript | 现代 React 全栈框架，支持 App Router、服务端渲染与良好的开发体验。 |
 | **桌面客户端** | Tauri 2 | 使用系统 WebView 内嵌前端，包体小、性能好，替代 Electron 降低资源占用。 |
 | **配置管理** | YAML + serde_yaml | 人类可读的配置格式，支持环境变量展开与主目录简写。 |
@@ -132,6 +143,7 @@ rsmgo/
 │   │   │   ├── agent/         # Agent 编排逻辑
 │   │   │   ├── config/        # app.yaml 加载与解析
 │   │   │   ├── memory/        # SQLite 记忆存储
+│   │   │   ├── mcp/           # MCP 客户端（rmcp：stdio / HTTP 接入外部工具）
 │   │   │   ├── providers/     # LLM Provider 抽象与实现
 │   │   │   ├── server.rs      # gRPC + HTTP 服务
 │   │   │   ├── tools/         # 工具注册与内置工具
@@ -149,6 +161,7 @@ rsmgo/
 │       ├── api/               # HTTP API 与路由
 │       ├── config/            # Go 侧配置读取
 │       ├── engine/            # gRPC 引擎客户端
+│       ├── mcp/               # MCP 服务端（go-sdk：stdio 子命令 + /mcp HTTP）
 │       ├── session/           # 会话文件存储
 │       └── workspace/         # 工作区目录存储
 ├── pb/                        # 生成的 Go protobuf 代码
@@ -456,6 +469,31 @@ tools:
     - fetch_url
 ```
 
+### `mcp_servers`
+
+要连接的外部 MCP server。每个 server 的工具会导入到引擎中，并以 `mcp__{server}__{tool}` 的名称出现在前端工具菜单中。支持两种传输方式：
+
+- `stdio`：启动本地命令，通过其标准输入/输出通信。
+- `http`：连接远程 Streamable HTTP MCP 端点。
+
+```yaml
+mcp_servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      NODE_ENV: production
+
+  - name: remote
+    transport: http
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer ${MCP_API_KEY}"
+```
+
+连接失败的 server 只会记录告警并跳过，不会阻塞引擎启动。修改此列表后需重启引擎生效。
+
 ### `control_plane`
 
 Go 控制面监听地址与引擎地址。
@@ -494,6 +532,31 @@ control_plane:
 | `search` | 使用 `find` 按文件名模式递归搜索。 | `directory`: 搜索目录；`pattern`: 文件名模式，如 `*.rs` |
 | `web_search` | 联网搜索。 | `query`: 搜索关键词 |
 | `fetch_url` | 抓取指定网页并返回文本内容。 | `url`: 目标网页地址 |
+
+### MCP 工具（导入外部工具）
+
+`mcp_servers` 中配置的 MCP server 导入的工具与内置工具行为一致：会出现在前端工具菜单（名称带 server 前缀），可按会话启用。命名规则为 `mcp__{server}__{tool}`，例如名为 `filesystem` 的 server 提供的 `read_file` 工具会注册为 `mcp__filesystem__read_file`。
+
+### 将 rsmgo 对外暴露为 MCP server
+
+Go 控制面本身可以作为 MCP server，把引擎的全部工具（含导入的 MCP 工具）代理给外部 MCP 客户端：
+
+- **stdio**：运行 `rsmgo-control mcp`，供本地 MCP 客户端接入。例如在 Claude Desktop 的配置中：
+
+  ```json
+  {
+    "mcpServers": {
+      "rsmgo": {
+        "command": "/path/to/rsmgo-control",
+        "args": ["mcp"]
+      }
+    }
+  }
+  ```
+
+- **Streamable HTTP**：控制面在 `POST http://<control-plane>:9090/mcp` 提供 MCP 服务，可供远程 MCP 客户端或 MCP Inspector 使用。
+
+工具列表在控制面启动时从引擎拉取一次；引擎工具集变化后需重启控制面。
 
 ### 使用示例
 
@@ -748,6 +811,7 @@ curl http://127.0.0.1:8080/api/v1/providers
 | `agent` | Agent 编排，处理请求生命周期、工具调用循环与记忆写入。 |
 | `config` | `app.yaml` 解析、环境变量展开、路径展开。 |
 | `memory` | 基于 SQLite 的会话与消息持久化。 |
+| `mcp` | MCP 客户端（rmcp 3.2.0）：连接外部 MCP server（stdio / Streamable HTTP），将外部工具包装为 `mcp__{server}__{tool}` 注册进工具表。 |
 | `providers` | LLM Provider Trait、`OpenAiCompatibleProvider`、`AnthropicProvider` 与注册表。 |
 | `server` | gRPC Engine 服务与 Axum HTTP 路由。 |
 | `tools` | 工具 Trait、注册表与内置工具实现。 |
@@ -764,6 +828,7 @@ curl http://127.0.0.1:8080/api/v1/providers
 | `api` | Gin HTTP 服务、RESTful 路由、CORS、会话接口。 |
 | `config` | 读取 `app.yaml` 并提取控制面所需字段。 |
 | `engine` | gRPC 客户端，封装与 Rust 引擎的通信。 |
+| `mcp` | MCP 服务端（modelcontextprotocol/go-sdk）：把引擎工具代理给外部 MCP 客户端，支持 stdio（`rsmgo-control mcp`）与 Streamable HTTP（`/mcp`）。 |
 | `session` | 基于本地 JSON 文件的轻量会话存储。 |
 | `workspace` | 基于本地 JSON 文件的轻量工作区目录存储。 |
 
@@ -799,7 +864,7 @@ pnpm tauri build
 
 rsmgo 当前处于 MVP 阶段，后续计划在以下方向持续演进：
 
-- **MCP 协议支持**：接入 Model Context Protocol，扩展工具生态与外部数据源。
+- **MCP 能力增强**：MCP 工具热更新（引擎工具集变化后无需重启控制面）、MCP 资源（resources）与提示模板（prompts）支持。
 - **更丰富的工具**：增加网络请求、数据库查询、Git 操作、浏览器自动化等工具。
 - **多 Agent 协作**：支持任务分解、子 Agent 调用与结果汇总。
 - **记忆增强**：引入向量检索与长期记忆摘要，提升跨会话连贯性。

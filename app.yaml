@@ -112,6 +112,27 @@ tools:
     - web_search
     - fetch_url
 
+# External MCP servers whose tools are imported into the agent's tool
+# registry. Imported tools are named mcp__{server}__{tool} and can be used
+# like any built-in tool. Two transports are supported:
+#   - stdio: spawn a local command and speak MCP over its stdin/stdout
+#   - http:  connect to a remote Streamable HTTP MCP endpoint
+mcp_servers:
+  # Example: local filesystem access via the reference MCP server (requires npx).
+  # - name: filesystem
+  #   transport: stdio
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  #   env:
+  #     NODE_ENV: production
+
+  # Example: a remote MCP server over Streamable HTTP.
+  # - name: remote
+  #   transport: http
+  #   url: "https://example.com/mcp"
+  #   headers:
+  #     Authorization: "Bearer ${MCP_API_KEY}"
+
 control_plane:
   addr: ":9090"
   engine_addr: "127.0.0.1:50051"
