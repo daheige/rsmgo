@@ -19,13 +19,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ledongthuc/pdf"
+
 	"github.com/daheige/rsmgo/control/internal/engine"
 	"github.com/daheige/rsmgo/control/internal/session"
 	"github.com/daheige/rsmgo/control/internal/workspace"
 	pb "github.com/daheige/rsmgo/pb"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/ledongthuc/pdf"
 )
 
 // maxImageBytes caps the size of an image attachment that is sent to the model
@@ -128,13 +129,14 @@ func (s *Server) Run(addr string) error {
 
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
+
 		c.Next()
 	}
 }
@@ -462,11 +464,11 @@ func (s *Server) chat(c *gin.Context) {
 // Used when the client requested streaming but the server has disabled it via
 // the chat_stream configuration option.
 func (s *Server) streamSingle(c *gin.Context, id string, sess *session.Session, resp *pb.ChatResponse, started time.Time) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.WriteHeader(http.StatusOK)
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
 
 	if resp.Message != nil {
 		sess.Messages = append(sess.Messages, session.Message{
@@ -496,12 +498,13 @@ func (s *Server) streamSingle(c *gin.Context, id string, sess *session.Session, 
 // Server-Sent Events: each chunk is marshalled to JSON and written as a
 // `data:` line, with the final assistant message persisted to the session when
 // the stream reports done.
-func (s *Server) streamChat(c *gin.Context, ctx context.Context, id string, sess *session.Session, pbReq *pb.ChatRequest, started time.Time) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.WriteHeader(http.StatusOK)
+func (s *Server) streamChat(c *gin.Context, ctx context.Context, id string, sess *session.Session,
+	pbReq *pb.ChatRequest, started time.Time) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
 
 	stream, err := s.engine.ChatStream(ctx, pbReq)
 	if err != nil {
