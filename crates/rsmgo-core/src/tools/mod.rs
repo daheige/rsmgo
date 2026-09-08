@@ -4,7 +4,11 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub mod browser;
 pub mod builtin;
+pub mod db;
+pub mod git;
+pub mod net;
 pub mod web;
 
 /// Per-request context handed to tool executions. Carries the active workspace
@@ -119,12 +123,16 @@ impl ToolRegistry {
         let workspace_dir = workspace_dir.into();
         let mut registry = Self::new();
         registry.register(Box::new(builtin::ReadFileTool));
-        registry.register(Box::new(builtin::WriteFileTool::new(workspace_dir)));
+        registry.register(Box::new(builtin::WriteFileTool::new(workspace_dir.clone())));
         registry.register(Box::new(builtin::ExecuteCommandTool));
         registry.register(Box::new(builtin::ListDirectoryTool));
         registry.register(Box::new(builtin::SearchTool));
         registry.register(Box::new(web::WebSearchTool));
         registry.register(Box::new(web::FetchUrlTool));
+        registry.register(Box::new(net::HttpRequestTool));
+        registry.register(Box::new(db::DbQueryTool));
+        registry.register(Box::new(git::GitTool));
+        registry.register(Box::new(browser::BrowserTool::new(workspace_dir)));
         registry
     }
 }

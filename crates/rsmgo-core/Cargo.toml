@@ -31,6 +31,7 @@ rusqlite = { workspace = true }
 dirs = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }
+headless_chrome = { workspace = true }
 
 [[bin]]
 name = "rsmgo-engine"

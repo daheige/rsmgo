@@ -21,38 +21,52 @@ const ServerName = "rsmgo"
 // Declared as an interface so tests can substitute a fake engine.
 type EngineClient interface {
 	ListTools(ctx context.Context) (*pb.ListToolsResponse, error)
+	ListModels(ctx context.Context, provider string) (*pb.ListModelsResponse, error)
+	Health(ctx context.Context) (*pb.HealthResponse, error)
 	ExecuteTool(ctx context.Context, name, args string) (*pb.ExecuteToolResponse, error)
+}
+
+// serverConfig collects optional knobs for NewServer.
+type serverConfig struct {
+	// toolRefreshInterval is how often the MCP server re-syncs its tool list
+	// with the engine. Zero or negative disables background refresh.
+	toolRefreshInterval time.Duration
+}
+
+// ServerOption customizes NewServer.
+type ServerOption func(*serverConfig)
+
+// WithToolRefreshInterval sets how often the server re-syncs its tool list
+// with the engine (default 30s). Pass a zero or negative duration to disable
+// background refresh; the initial sync still happens at startup.
+func WithToolRefreshInterval(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.toolRefreshInterval = d }
 }
 
 // NewServer builds an MCP server that proxies every tool registered in the
 // engine (including tools imported from external MCP servers).
 //
-// Tool definitions are fetched once at startup. If the engine is unreachable,
-// the server is still returned but has no tools registered — a control plane
-// restart after the engine recovers repopulates the list.
-func NewServer(ec EngineClient, version string) *mcpgo.Server {
+// The tool list is synced at startup and then re-synced in the background
+// (every 30s by default, configurable via WithToolRefreshInterval), so the
+// control plane picks up engine tool-set changes without a restart; connected
+// clients are notified via the standard tools/list_changed notification.
+// If the engine is unreachable at startup the server still comes up (with no
+// proxy tools) and fills in the tools once the engine answers a later refresh.
+//
+// The server also exposes MCP resources (rsmgo://tools, rsmgo://providers,
+// rsmgo://health) and built-in prompt templates (code_review, explain_code,
+// summarize_text).
+func NewServer(ec EngineClient, version string, opts ...ServerOption) *mcpgo.Server {
+	cfg := serverConfig{toolRefreshInterval: 30 * time.Second}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	srv := mcpgo.NewServer(&mcpgo.Implementation{Name: ServerName, Version: version}, nil)
-	registerEngineTools(srv, ec)
+	registerResources(srv, ec)
+	registerPrompts(srv)
+	newToolWatcher(srv, ec, cfg.toolRefreshInterval)
 	return srv
-}
-
-// registerEngineTools fetches the engine's tool list and registers a proxy
-// handler for each tool.
-func registerEngineTools(srv *mcpgo.Server, ec EngineClient) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := ec.ListTools(ctx)
-	if err != nil {
-		log.Printf("mcp: failed to list engine tools (engine unreachable?): %v; starting with no tools", err)
-		return
-	}
-	for _, info := range resp.Tools {
-		if !addProxyTool(srv, ec, info) {
-			continue
-		}
-	}
-	log.Printf("mcp: registered %d tools from engine", len(resp.Tools))
 }
 
 // addProxyTool registers one engine tool as an MCP tool whose handler forwards

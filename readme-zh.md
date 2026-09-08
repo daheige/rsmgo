@@ -40,7 +40,7 @@ rsmgo 允许用户自由接入自己偏好的大语言模型（Claude、GPT、De
 - **停止生成**：在界面中停止进行中的对话——前端中止请求，并通知控制面取消引擎侧的生成。
 - **富文本渲染与消息操作**：助手回复以 Markdown 渲染，代码块按语言自动语法高亮并提供一键复制；每条助手消息带复制按钮，最后一条消息带「重新生成」按钮，可原地重跑上一次回答。
 - **工作区**：在侧边栏添加并管理本地目录工作区，每个工作区可勾选允许使用的工具（工具级权限）。会话选择了工作区时，Agent 直接在该目录内读写（把它当作真正的工作目录），且仅能调用该工作区允许的工具；未设置工作区时，文件退回默认 `outputs/` 目录并提供下载链接。
-- **MCP 协议支持**：双向接入 Model Context Protocol。作为 MCP 客户端，引擎从外部 MCP server（stdio 或 Streamable HTTP）导入工具，注册为 `mcp__{server}__{tool}` 工具；作为 MCP 服务端，Go 控制面通过 stdio（`rsmgo-control mcp`）或 HTTP（`/mcp`）把引擎的全部工具暴露给外部 MCP 客户端。
+- **MCP 协议支持**：双向接入 Model Context Protocol。作为 MCP 客户端，引擎从外部 MCP server（stdio 或 Streamable HTTP）导入工具，注册为 `mcp__{server}__{tool}` 工具，同时把对方暴露的 resources（注册为 `mcp__{server}__read_resource`）与 prompts（注册为 `mcp__{server}__prompt__{name}`）导入为可用工具；作为 MCP 服务端，Go 控制面通过 stdio（`rsmgo-control mcp`）或 HTTP（`/mcp`）把引擎的全部工具暴露给外部 MCP 客户端，工具列表每 30 秒与引擎自动同步（热更新，无需重启控制面），并内置 `rsmgo://tools`、`rsmgo://providers`、`rsmgo://health` 资源与 code_review / explain_code / summarize_text 提示模板。
 - **环境感知配置**：`app.yaml` 支持 `${VAR}` 环境变量展开与 `~` 主目录简写，便于不同环境部署。
 
 ---
@@ -97,7 +97,7 @@ graph TD
    - 作为前端与引擎之间的网关，统一暴露 RESTful API（`/api/v1/*`）。
    - 负责会话的 CRUD、工作区管理、会话取消、消息转发、健康检查与跨域支持。
    - 通过 gRPC 客户端与 Rust 引擎通信。
-   - `mcp` 包基于 modelcontextprotocol/go-sdk 实现 MCP 服务端：启动时从引擎拉取工具列表并注册代理工具，通过 `rsmgo-control mcp`（stdio）或 `/mcp`（Streamable HTTP）暴露给外部 MCP 客户端。
+   - `mcp` 包基于 modelcontextprotocol/go-sdk 实现 MCP 服务端：启动时从引擎拉取工具列表注册代理工具，此后每 30 秒热更新一次；通过 `rsmgo-control mcp`（stdio）或 `/mcp`（Streamable HTTP）暴露给外部 MCP 客户端，并提供 `rsmgo://` 资源与内置提示模板。
 
 3. **前端层**
    - **Web**：基于 Next.js 16 + React 19 的聊天界面，通过 `next.config.js` 的 rewrites 将 `/api/*` 代理到控制面。界面提供停止按钮以取消进行中的生成，以及侧边栏用于管理本地工作区目录。
@@ -467,6 +467,10 @@ tools:
     - search
     - web_search
     - fetch_url
+    - http_request
+    - db_query
+    - git
+    - browser
 ```
 
 ### `mcp_servers`
@@ -532,10 +536,21 @@ control_plane:
 | `search` | 使用 `find` 按文件名模式递归搜索。 | `directory`: 搜索目录；`pattern`: 文件名模式，如 `*.rs` |
 | `web_search` | 联网搜索。 | `query`: 搜索关键词 |
 | `fetch_url` | 抓取指定网页并返回文本内容。 | `url`: 目标网页地址 |
+| `http_request` | 发起任意 HTTP 请求（GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS），返回状态码、响应头与响应体（截断至 8000 字符）。适合调用 REST API、Webhook。 | `url`: 请求地址；`method`: 方法（默认 GET）；`headers`: 请求头对象；`body`: 请求体；`timeout_secs`: 超时（默认 30，最大 120） |
+| `db_query` | 对 SQLite 数据库执行单条 SQL，默认只读，结果以 JSON 数组返回（最多 500 行）。 | `url`: 连接串 `sqlite://path/to.db`；`sql`: 单条 SQL；`write`: 允许写操作（INSERT/UPDATE/DELETE/DDL，默认 false） |
+| `git` | 执行 git 子命令（status/diff/log/blame/add/commit/checkout/switch/merge/rebase/stash/reset 等），输出截断至 10000 字符。 | `args`: 完整参数数组，首元素必须是子命令；`working_dir`: 仓库目录（默认工作区根目录） |
+| `browser` | 驱动无头 Chrome：提取页面文本（可指定 CSS 选择器）、截图保存 PNG（返回下载链接）、执行 JavaScript 并返回值。 | `action`: `text`/`screenshot`/`eval`；`url`: 页面地址；`selector`: CSS 选择器；`expression`: JS 表达式；`output`: 截图文件名；`browser_path`: Chrome 路径（默认自动检测，可用环境变量 `CHROME_PATH` 指定） |
+
+> **安全说明**：`db_query` 默认以只读方式打开数据库（SQLite 语句级 `readonly` 判定 + 只读连接），写操作必须显式传 `write: true`；每次调用仅允许一条语句，多语句会被拒绝。`git` 使用子命令白名单，禁止 push/pull/fetch/clone/config 等远程与配置操作，并拦截 `-c`、`--git-dir`、`--work-tree`、`-C` 等可注入配置或越出工作目录的参数。`browser` 需要本机装有 Chrome/Chromium，使用一次性配置文件，不触碰用户浏览器数据。`http_request` 与 `fetch_url` 一样直接访问网络，请勿在响应体中盲信不可信内容。
 
 ### MCP 工具（导入外部工具）
 
 `mcp_servers` 中配置的 MCP server 导入的工具与内置工具行为一致：会出现在前端工具菜单（名称带 server 前缀），可按会话启用。命名规则为 `mcp__{server}__{tool}`，例如名为 `filesystem` 的 server 提供的 `read_file` 工具会注册为 `mcp__filesystem__read_file`。
+
+除工具外，引擎还会把每个外部 MCP server 暴露的 **resources** 与 **prompts** 一并导入：
+
+- **resources**：每个 server 注册一个只读工具 `mcp__{server}__read_resource`，工具描述中列出该 server 的全部资源 URI，调用时传入 `uri` 参数即可读取内容。不支持 resources 能力的 server 会自动跳过。
+- **prompts**：每个提示模板注册一个工具 `mcp__{server}__prompt__{name}`，参数 schema 由模板的参数定义生成（必填参数标记 `required`）。调用即通过对方的 `prompts/get` 渲染模板并返回文本，模型可以借此使用外部提示词库。
 
 ### 将 rsmgo 对外暴露为 MCP server
 
@@ -556,7 +571,17 @@ Go 控制面本身可以作为 MCP server，把引擎的全部工具（含导入
 
 - **Streamable HTTP**：控制面在 `POST http://<control-plane>:9090/mcp` 提供 MCP 服务，可供远程 MCP 客户端或 MCP Inspector 使用。
 
-工具列表在控制面启动时从引擎拉取一次；引擎工具集变化后需重启控制面。
+**工具热更新**：控制面启动时从引擎拉取一次工具列表，此后每 30 秒自动重新同步（可通过代码中 `WithToolRefreshInterval` 调整）。引擎重启或工具集变化后，新增工具自动注册、消失的工具自动移除，已连接的客户端会收到标准 `notifications/tools/list_changed` 通知，**无需重启控制面**。引擎暂时不可达时会保留现有工具，恢复后自动补齐。
+
+**内置 resources**：控制面同时暴露以下 MCP 资源（每次读取实时计算）：
+
+| URI | 内容 |
+|-----|------|
+| `rsmgo://tools` | 引擎当前工具列表（含参数 schema） |
+| `rsmgo://providers` | 已配置的 LLM 提供商与模型 |
+| `rsmgo://health` | 引擎健康状态与版本 |
+
+**内置 prompts**：提供 `code_review`（代码评审）、`explain_code`（代码讲解）、`summarize_text`（文本摘要）三个提示模板，客户端可通过 `prompts/list` / `prompts/get` 使用。
 
 ### 使用示例
 
@@ -572,6 +597,10 @@ tools:
     - search
     - web_search
     - fetch_url
+    - http_request
+    - db_query
+    - git
+    - browser
 ```
 
 重启引擎后，前端工具菜单会显示这些工具。勾选 `list_directory` 后发送“列出当前目录”，模型可能会调用：
@@ -864,8 +893,8 @@ pnpm tauri build
 
 rsmgo 当前处于 MVP 阶段，后续计划在以下方向持续演进：
 
-- **MCP 能力增强**：MCP 工具热更新（引擎工具集变化后无需重启控制面）、MCP 资源（resources）与提示模板（prompts）支持。
-- **更丰富的工具**：增加网络请求、数据库查询、Git 操作、浏览器自动化等工具。
+- **MCP 能力深化**：MCP 资源订阅（resources/subscribe）、采样（sampling）与elicitation 支持，MCP server 鉴权与多客户端会话管理。
+- **更丰富的工具**：电子表格、邮件、日历、Slack 等办公与协作平台集成；更多数据库（PostgreSQL、MySQL）与浏览器（Playwright 风格多步脚本）支持。
 - **多 Agent 协作**：支持任务分解、子 Agent 调用与结果汇总。
 - **记忆增强**：引入向量检索与长期记忆摘要，提升跨会话连贯性。
 - **权限与安全**：工具调用沙箱化、操作确认、敏感命令拦截策略。

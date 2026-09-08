@@ -701,7 +701,12 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
   },
   iconButton: {
-    border: "1px solid #334155",
+    // Longhand border properties (not the `border` shorthand) so toggling
+    // iconButtonActive's borderColor on rerender does not trip React's
+    // shorthand/longhand style conflict warning.
+    borderWidth: "1px",
+    borderStyle: "solid",
+    borderColor: "#334155",
     background: "#0f172a",
     color: "#cbd5e1",
     cursor: "pointer",

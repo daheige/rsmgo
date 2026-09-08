@@ -40,7 +40,7 @@ rsmgo lets you connect to your preferred large language model (Claude, GPT, Deep
 - **Stop generation**: Stop an in-flight chat from the UI — the frontend aborts the request and asks the control plane to cancel the engine-side generation.
 - **Rich rendering & message actions**: Assistant replies are rendered as Markdown with per-language syntax-highlighted code blocks and one-click copy; each assistant message has a copy button, and the last message offers a regenerate button to re-run the previous answer in place.
 - **Workspaces**: Add and manage local directory workspaces from the sidebar, each with a per-tool permission list. When a session selects a workspace, the agent reads and writes directly inside that directory (its true working directory) and is restricted to the workspace's allowed tools; without a workspace, files fall back to the default `outputs/` directory with a download link.
-- **MCP protocol support**: Two-way Model Context Protocol integration. As an MCP client, the engine imports tools from external MCP servers (stdio or Streamable HTTP) and registers them as `mcp__{server}__{tool}` tools; as an MCP server, the Go control plane exposes the engine's full tool set to external MCP clients over stdio (`rsmgo-control mcp`) or HTTP (`/mcp`).
+- **MCP protocol support**: Two-way Model Context Protocol integration. As an MCP client, the engine imports tools from external MCP servers (stdio or Streamable HTTP) and registers them as `mcp__{server}__{tool}` tools — along with the servers' resources (as `mcp__{server}__read_resource`) and prompt templates (as `mcp__{server}__prompt__{name}`). As an MCP server, the Go control plane exposes the engine's full tool set to external MCP clients over stdio (`rsmgo-control mcp`) or HTTP (`/mcp`), re-syncing the tool list with the engine every 30s (hot-reload, no control-plane restart needed), and ships built-in `rsmgo://tools`, `rsmgo://providers`, and `rsmgo://health` resources plus code_review / explain_code / summarize_text prompt templates.
 - **Environment-aware configuration**: `app.yaml` supports `${VAR}` environment variable expansion and `~` home-directory shorthand for flexible deployment.
 
 ---
@@ -97,7 +97,7 @@ graph TD
    - Acts as a gateway between frontends and the engine, exposing a unified RESTful API under `/api/v1/*`.
    - Responsible for session CRUD, workspace management, chat cancellation, message forwarding, health checks, and CORS.
    - Communicates with the Rust engine through a gRPC client.
-   - The `mcp` package implements an MCP server on modelcontextprotocol/go-sdk: it fetches the engine's tool list at startup, registers a proxy handler per tool, and exposes them over `rsmgo-control mcp` (stdio) or `/mcp` (Streamable HTTP) to external MCP clients.
+   - The `mcp` package implements an MCP server on modelcontextprotocol/go-sdk: it registers a proxy handler per engine tool at startup and re-syncs the tool list every 30s (hot-reload), exposes them over `rsmgo-control mcp` (stdio) or `/mcp` (Streamable HTTP), and provides `rsmgo://` resources and built-in prompt templates.
 
 3. **Frontend layer**
    - **Web**: Chat interface built with Next.js 16 and React 19. `next.config.js` rewrites `/api/*` to the control plane. The UI offers a stop button to cancel in-flight generation and a sidebar for managing local workspace directories.
@@ -458,6 +458,10 @@ tools:
     - search
     - web_search
     - fetch_url
+    - http_request
+    - db_query
+    - git
+    - browser
 ```
 
 ### `mcp_servers`
@@ -523,10 +527,21 @@ Tools require two steps to become active:
 | `search` | Recursively search for files by name pattern using `find`. | `directory`: search directory; `pattern`: filename pattern, e.g. `*.rs` |
 | `web_search` | Search the web. | `query`: search query |
 | `fetch_url` | Fetch and return the text content of a URL. | `url`: target URL |
+| `http_request` | Make an HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS) and return the status code, response headers, and body (truncated to 8000 characters). Handy for REST APIs and webhooks. | `url`: request URL; `method`: HTTP method (default GET); `headers`: request headers object; `body`: request body; `timeout_secs`: timeout (default 30, max 120) |
+| `db_query` | Run a single SQL statement against a SQLite database. Read-only by default; results are returned as a JSON array (max 500 rows). | `url`: connection string `sqlite://path/to.db`; `sql`: a single SQL statement; `write`: allow data-modifying statements (INSERT/UPDATE/DELETE/DDL, default false) |
+| `git` | Run a git subcommand (status/diff/log/blame/add/commit/checkout/switch/merge/rebase/stash/reset, ...). Output is capped at 10000 characters. | `args`: full argument array whose first element must be a subcommand; `working_dir`: repository directory (defaults to the workspace root) |
+| `browser` | Drive a headless Chrome: extract page text (optionally by CSS selector), save a screenshot as a PNG (returned as a download link), or evaluate JavaScript and return its value. | `action`: `text`/`screenshot`/`eval`; `url`: page URL; `selector`: CSS selector; `expression`: JS expression; `output`: screenshot file name; `browser_path`: Chrome binary (auto-detected by default; set `CHROME_PATH` to override) |
+
+> **Safety notes**: `db_query` opens databases read-only by default (SQLite statement-level `readonly` check plus a read-only connection); writes require an explicit `write: true`, and only one statement per call is allowed — multi-statement input is rejected. `git` uses a subcommand allowlist that excludes push/pull/fetch/clone/config and other remote or configuration operations, and blocks argument-injection flags such as `-c`, `--git-dir`, `--work-tree`, and `-C`. `browser` needs a local Chrome/Chromium and runs with a throwaway profile, leaving the user's browser data untouched. Like `fetch_url`, `http_request` reaches the open internet — do not blindly trust untrusted response content.
 
 ### MCP tools (importing external tools)
 
 Any tool imported from an MCP server configured in `mcp_servers` behaves like a built-in tool: it appears in the frontend tool menu (prefixed with the server name) and can be enabled per chat. Naming follows `mcp__{server}__{tool}`, e.g. a `read_file` tool from a server named `filesystem` is registered as `mcp__filesystem__read_file`.
+
+Beyond tools, the engine also imports each external MCP server's **resources** and **prompts**:
+
+- **resources**: each server gets one read-only tool `mcp__{server}__read_resource` whose description lists all of the server's resource URIs; pass a `uri` argument to read its content. Servers without the resources capability are skipped automatically.
+- **prompts**: each prompt template becomes a tool `mcp__{server}__prompt__{name}` whose parameter schema is generated from the template's argument list (required arguments marked). Calling it renders the template through the server's `prompts/get` and returns the text, so the model can adopt external prompt libraries.
 
 ### Exposing rsmgo as an MCP server
 
@@ -547,7 +562,17 @@ The Go control plane can itself act as an MCP server, proxying the engine's enti
 
 - **Streamable HTTP**: the control plane serves MCP at `POST http://<control-plane>:9090/mcp`, suitable for remote MCP clients and the MCP Inspector.
 
-Tool definitions are fetched from the engine once at control-plane startup; restart the control plane if the engine's tool set changes.
+**Hot-reload**: the control plane fetches the tool list from the engine at startup and re-syncs every 30 seconds afterwards (adjustable via `WithToolRefreshInterval` in code). When the engine restarts or its tool set changes, new tools are registered and vanished ones removed automatically, and connected clients receive the standard `notifications/tools/list_changed` notification — **no control-plane restart required**. If the engine is temporarily unreachable, the current tools are kept and backfilled once it recovers.
+
+**Built-in resources**: the control plane also exposes these MCP resources (recomputed on every read):
+
+| URI | Content |
+|-----|---------|
+| `rsmgo://tools` | The engine's current tool list (with parameter schemas) |
+| `rsmgo://providers` | Configured LLM providers and their models |
+| `rsmgo://health` | Engine health status and version |
+
+**Built-in prompts**: three prompt templates — `code_review`, `explain_code`, and `summarize_text` — are available to clients via `prompts/list` / `prompts/get`.
 
 ### Example
 
@@ -563,6 +588,10 @@ tools:
     - search
     - web_search
     - fetch_url
+    - http_request
+    - db_query
+    - git
+    - browser
 ```
 
 After restarting the engine, these tools appear in the frontend tool menu. If you check `list_directory` and send "list the current directory", the model may call:
@@ -849,8 +878,8 @@ pnpm tauri build
 
 rsmgo is currently at the MVP stage. Planned directions include:
 
-- **Enhanced MCP capabilities**: Hot-reload of MCP tool definitions (no control-plane restart when the engine tool set changes), plus MCP resources and prompt templates.
-- **Richer tools**: Add network requests, database queries, Git operations, browser automation, and more.
+- **Deeper MCP capabilities**: Resource subscriptions (resources/subscribe), sampling, and elicitation support; MCP server authentication and multi-client session management.
+- **Richer tools**: Integrations for spreadsheets, email, calendars, Slack, and other office/collaboration platforms; support for more databases (PostgreSQL, MySQL) and multi-step browser scripting (Playwright-style).
 - **Multi-agent collaboration**: Task decomposition, sub-agent invocation, and result aggregation.
 - **Enhanced memory**: Vector retrieval and long-term memory summarization for better cross-session continuity.
 - **Permissions and safety**: Tool-call sandboxing, operation confirmation, and sensitive-command interception policies.

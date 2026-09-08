@@ -111,6 +111,10 @@ tools:
     - search
     - web_search
     - fetch_url
+    - http_request
+    - db_query
+    - git
+    - browser
 
 # External MCP servers whose tools are imported into the agent's tool
 # registry. Imported tools are named mcp__{server}__{tool} and can be used

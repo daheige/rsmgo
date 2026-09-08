@@ -20,6 +20,16 @@ func (f *fakeEngine) ListTools(ctx context.Context) (*pb.ListToolsResponse, erro
 	return &pb.ListToolsResponse{Tools: f.tools}, nil
 }
 
+func (f *fakeEngine) ListModels(ctx context.Context, provider string) (*pb.ListModelsResponse, error) {
+	return &pb.ListModelsResponse{Models: []*pb.ModelInfo{
+		{Id: "deepseek-chat", Provider: "deepseek", DisplayName: "DeepSeek V3"},
+	}}, nil
+}
+
+func (f *fakeEngine) Health(ctx context.Context) (*pb.HealthResponse, error) {
+	return &pb.HealthResponse{Status: "ok", Version: "test-version"}, nil
+}
+
 func (f *fakeEngine) ExecuteTool(ctx context.Context, name, args string) (*pb.ExecuteToolResponse, error) {
 	f.called = append(f.called, name)
 	f.lastArgs = args
@@ -149,6 +159,14 @@ type failingEngine struct{}
 
 func (f *failingEngine) ListTools(ctx context.Context) (*pb.ListToolsResponse, error) {
 	return &pb.ListToolsResponse{Tools: []*pb.ToolInfo{{Name: "boom"}}}, nil
+}
+
+func (f *failingEngine) ListModels(ctx context.Context, provider string) (*pb.ListModelsResponse, error) {
+	return nil, errors.New("engine gone")
+}
+
+func (f *failingEngine) Health(ctx context.Context) (*pb.HealthResponse, error) {
+	return nil, errors.New("engine gone")
 }
 
 func (f *failingEngine) ExecuteTool(ctx context.Context, name, args string) (*pb.ExecuteToolResponse, error) {
