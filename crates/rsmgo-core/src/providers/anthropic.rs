@@ -199,6 +199,8 @@ struct AnthropicStreamEvent {
 enum AnthropicStreamContentBlock {
     #[serde(rename = "text")]
     Text,
+    #[serde(rename = "thinking")]
+    Thinking,
     #[serde(rename = "tool_use")]
     ToolUse {
         #[serde(default)]
@@ -212,9 +214,11 @@ enum AnthropicStreamContentBlock {
 #[serde(tag = "type")]
 enum AnthropicStreamDelta {
     #[serde(rename = "text_delta")]
-    TextDelta { text: String },
+    Text { text: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
     #[serde(rename = "input_json_delta")]
-    InputJsonDelta { partial_json: String },
+    InputJson { partial_json: String },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -243,10 +247,12 @@ struct AnthropicToolUseAccum {
 }
 
 /// Parse one SSE event body (the text between `\n\n` boundaries) and fold it
-/// into the stream state. Returns the concatenated text content carried by the
-/// event so the caller can forward it as a `Delta`.
-fn apply_anthropic_event(event: &str, state: &mut AnthropicStreamState) -> String {
+/// into the stream state. Returns the concatenated answer text and reasoning
+/// (thinking) text carried by the event so the caller can forward them as
+/// `Delta` / `Reasoning` events.
+fn apply_anthropic_event(event: &str, state: &mut AnthropicStreamState) -> (String, String) {
     let mut appended = String::new();
+    let mut reasoning = String::new();
     for line in event.lines() {
         let line = line.trim_end_matches('\r');
         let Some(data) = line.strip_prefix("data:") else {
@@ -276,8 +282,11 @@ fn apply_anthropic_event(event: &str, state: &mut AnthropicStreamState) -> Strin
             "content_block_delta" => {
                 if let (Some(index), Some(delta)) = (ev.index, ev.delta) {
                     match delta {
-                        AnthropicStreamDelta::TextDelta { text } => appended.push_str(&text),
-                        AnthropicStreamDelta::InputJsonDelta { partial_json } => {
+                        AnthropicStreamDelta::Text { text } => appended.push_str(&text),
+                        AnthropicStreamDelta::Thinking { thinking } => {
+                            reasoning.push_str(&thinking)
+                        }
+                        AnthropicStreamDelta::InputJson { partial_json } => {
                             state
                                 .tcs
                                 .entry(index)
@@ -305,7 +314,7 @@ fn apply_anthropic_event(event: &str, state: &mut AnthropicStreamState) -> Strin
             _ => {}
         }
     }
-    appended
+    (appended, reasoning)
 }
 
 #[async_trait]
@@ -428,7 +437,10 @@ impl LlmProvider for AnthropicProvider {
 
         tokio::spawn(async move {
             let mut body = response.bytes_stream();
-            let mut buffer = String::new();
+            // Raw bytes, not String: a multi-byte UTF-8 char may be split
+            // across chunks; only decode complete SSE events (see
+            // sse_event_boundary).
+            let mut buffer: Vec<u8> = Vec::new();
             let mut state = AnthropicStreamState {
                 text: String::new(),
                 tcs: BTreeMap::new(),
@@ -446,12 +458,20 @@ impl LlmProvider for AnthropicProvider {
                         return;
                     }
                 };
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                buffer.extend_from_slice(&bytes);
 
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event = buffer[..pos].to_string();
+                while let Some(pos) = super::sse_event_boundary(&buffer) {
+                    let event = String::from_utf8_lossy(&buffer[..pos]).into_owned();
                     buffer.drain(..pos + 2);
-                    let delta = apply_anthropic_event(&event, &mut state);
+                    let (delta, reasoning) = apply_anthropic_event(&event, &mut state);
+                    if !reasoning.is_empty()
+                        && tx
+                            .send(Ok(StreamEvent::Reasoning { text: reasoning }))
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
                     if !delta.is_empty() {
                         state.text.push_str(&delta);
                         if tx
@@ -467,8 +487,14 @@ impl LlmProvider for AnthropicProvider {
 
             // Flush any trailing partial event (e.g. a final line without a
             // trailing blank line).
-            if !buffer.trim().is_empty() {
-                let delta = apply_anthropic_event(&buffer, &mut state);
+            let trailing = String::from_utf8_lossy(&buffer);
+            if !trailing.trim().is_empty() {
+                let (delta, reasoning) = apply_anthropic_event(&trailing, &mut state);
+                if !reasoning.is_empty() {
+                    let _ = tx
+                        .send(Ok(StreamEvent::Reasoning { text: reasoning }))
+                        .await;
+                }
                 if !delta.is_empty() {
                     state.text.push_str(&delta);
                     let _ = tx.send(Ok(StreamEvent::Delta { text: delta })).await;

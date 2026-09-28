@@ -11,9 +11,9 @@ rsmgo-pb = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tonic = { workspace = true }
-prost = { workspace = true }
-tonic-reflection = { workspace = true }
-tonic-prost = { workspace = true }
+#prost = { workspace = true }
+#tonic-reflection = { workspace = true }
+#tonic-prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -32,6 +32,9 @@ dirs = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }
 headless_chrome = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "rsmgo-engine"

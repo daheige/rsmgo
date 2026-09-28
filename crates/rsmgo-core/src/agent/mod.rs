@@ -337,7 +337,7 @@ impl Agent {
             }
 
             let mut messages = request.messages.clone();
-            for _ in 0..MAX_TOOL_ROUNDS {
+            for round in 0..MAX_TOOL_ROUNDS {
                 if response.tool_calls.is_empty() {
                     break;
                 }
@@ -355,7 +355,21 @@ impl Agent {
                 messages.push(assistant_message);
 
                 let mut tool_results: Vec<Message> = Vec::new();
+                let round_no = round + 1;
                 for tc in &response.tool_calls {
+                    // Trace the ReAct loop: announce the action before
+                    // executing it, then report the observation.
+                    if tx
+                        .send(Ok(StreamEvent::Action {
+                            round: round_no,
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     let result = this
                         .tools
                         .execute(&tc.name, tc.arguments.clone(), &tool_ctx)
@@ -364,6 +378,17 @@ impl Agent {
                         Ok(out) => out,
                         Err(e) => format!("Error: {}", e),
                     };
+                    if tx
+                        .send(Ok(StreamEvent::Observation {
+                            round: round_no,
+                            name: tc.name.clone(),
+                            output: truncate_for_trace(&content),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     tool_results.push(Message::tool(content, &tc.id));
                 }
                 for msg in &tool_results {
@@ -428,6 +453,19 @@ impl Agent {
     }
 }
 
+/// Cap on tool output embedded in an `Observation` trace event, in
+/// characters. The full result is still persisted and sent to the model;
+/// only the displayed trace is truncated.
+const TRACE_OUTPUT_CHARS: usize = 600;
+
+fn truncate_for_trace(output: &str) -> String {
+    let mut out: String = output.chars().take(TRACE_OUTPUT_CHARS).collect();
+    if output.chars().count() > TRACE_OUTPUT_CHARS {
+        out.push_str("\n...(truncated)");
+    }
+    out
+}
+
 /// Consume one provider stream, forwarding `Delta` events downstream and
 /// returning the final `Done` response. Returns `None` when the downstream
 /// receiver is gone (client disconnected — the caller should stop), or
@@ -438,6 +476,18 @@ async fn collect_round(
 ) -> Option<Result<ChatResponse>> {
     while let Some(event) = stream.next().await {
         match event {
+            // Agent-level stages are produced by the agent itself, never by a
+            // provider stream; ignore defensively.
+            Ok(StreamEvent::Action { .. }) | Ok(StreamEvent::Observation { .. }) => {}
+            Ok(StreamEvent::Reasoning { text }) => {
+                if tx
+                    .send(Ok(StreamEvent::Reasoning { text }))
+                    .await
+                    .is_err()
+                {
+                    return None;
+                }
+            }
             Ok(StreamEvent::Delta { text }) => {
                 if tx.send(Ok(StreamEvent::Delta { text })).await.is_err() {
                     return None;
@@ -722,6 +772,158 @@ fn strip_inline_tool_calls(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::LlmProvider;
+    use crate::types::{ModelInfo, Usage};
+    use async_trait::async_trait;
+    use futures::stream;
+
+    /// Minimal provider that returns a canned stream, optionally with one
+    /// round of tool calling before the final answer.
+    struct MockProvider {
+        with_tool_call: bool,
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(&self, _request: ChatRequest, _tools: Vec<ToolDefinition>) -> Result<ChatResponse> {
+            unimplemented!()
+        }
+
+        async fn chat_stream(
+            &self,
+            request: ChatRequest,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let session_id = request.session_id.clone();
+            let has_tool_round = self.with_tool_call
+                // Tool round only on the first model call (no tool messages yet).
+                && !request.messages.iter().any(|m| m.role == "tool");
+            let events: Vec<Result<StreamEvent>> = if has_tool_round {
+                vec![
+                    Ok(StreamEvent::Reasoning {
+                        text: "let me check".to_string(),
+                    }),
+                    Ok(StreamEvent::Done {
+                        response: ChatResponse {
+                            session_id: session_id.clone(),
+                            message: Message::assistant(""),
+                            tool_calls: vec![ToolCall {
+                                id: "call_1".to_string(),
+                                name: "stub".to_string(),
+                                arguments: serde_json::json!({"x": 1}),
+                            }],
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(StreamEvent::Delta {
+                        text: "done".to_string(),
+                    }),
+                    Ok(StreamEvent::Done {
+                        response: ChatResponse {
+                            session_id,
+                            message: Message::assistant("done"),
+                            tool_calls: vec![],
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            };
+            Ok(Box::pin(stream::iter(events)))
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Minimal tool used to observe Action/Observation trace events.
+    struct StubTool;
+
+    #[async_trait]
+    impl Tool for StubTool {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn description(&self) -> &str {
+            "stub tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
+            Ok("stub result".to_string())
+        }
+    }
+
+    fn test_agent(with_tool_call: bool) -> Arc<Agent> {
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let mut providers = crate::providers::ProviderRegistry::new();
+        providers.register(Arc::new(MockProvider { with_tool_call }));
+        let mut tools = ToolRegistry::with_workspace(std::env::temp_dir());
+        tools.register(Box::new(StubTool));
+        Arc::new(
+            Agent::new(memory, std::env::temp_dir())
+                .with_providers(providers)
+                .with_tools(tools),
+        )
+    }
+
+    #[tokio::test]
+    async fn chat_stream_traces_react_loop_stages() {
+        let agent = test_agent(true);
+        let request = ChatRequest {
+            session_id: "s".to_string(),
+            messages: vec![Message::user("hi")],
+            provider: "mock".to_string(),
+            model: String::new(),
+            tool_names: vec![],
+            stream: true,
+            workspace: String::new(),
+            workspace_id: String::new(),
+        };
+        let mut stream = agent.chat_stream(request).await.unwrap();
+        let mut stages: Vec<StreamEvent> = Vec::new();
+        while let Some(ev) = stream.next().await {
+            stages.push(ev.unwrap());
+        }
+
+        // Expected trace: Thought → Action → Observation → Final Answer.
+        let kinds: Vec<&str> = stages
+            .iter()
+            .map(|e| match e {
+                StreamEvent::Reasoning { .. } => "thought",
+                StreamEvent::Action { .. } => "action",
+                StreamEvent::Observation { .. } => "observation",
+                StreamEvent::Delta { .. } => "answer",
+                StreamEvent::Done { .. } => "done",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["thought", "action", "observation", "answer", "done"], "{:?}", kinds);
+
+        match &stages[1] {
+            StreamEvent::Action { round, name, arguments } => {
+                assert_eq!(*round, 1);
+                assert_eq!(name, "stub");
+                assert_eq!(arguments["x"], 1);
+            }
+            other => panic!("expected Action, got {:?}", other),
+        }
+        match &stages[2] {
+            StreamEvent::Observation { round, name, output } => {
+                assert_eq!(*round, 1);
+                assert_eq!(name, "stub");
+                assert_eq!(output, "stub result");
+            }
+            other => panic!("expected Observation, got {:?}", other),
+        }
+    }
 
     #[test]
     fn parse_inline_write_file_with_newlines() {

@@ -1,15 +1,113 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use rsmgo_core::agent::Agent;
 use rsmgo_core::config::AppConfig;
 use rsmgo_core::memory::MemoryStore;
 use rsmgo_core::providers::registry_from_config;
-use rsmgo_core::types::{ChatRequest, Message};
-use std::io::{self, Write};
+use rsmgo_core::types::{ChatRequest, Message, StreamEvent};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+/// ANSI style helpers: colors only when stdout is a terminal.
+fn styled(s: &str, code: &str) -> String {
+    if std::io::stdout().is_terminal() {
+        format!("\x1b[{}m{}\x1b[0m", code, s)
+    } else {
+        s.to_string()
+    }
+}
+
+fn dim(s: &str) -> String {
+    styled(s, "2;3")
+}
+
+fn cyan(s: &str) -> String {
+    styled(s, "36;1")
+}
+
+/// Stream one chat turn to stdout, tracing the ReAct agent loop in
+/// English-labeled stages: Thought (reasoning, dimmed) → Action (tool call)
+/// → Observation (tool result) → ... → Final Answer. Ctrl-C interrupts the
+/// turn ("[Request interrupted by user]") and returns to the prompt, like
+/// Claude Code / Codex.
+async fn stream_turn(agent: Arc<Agent>, request: ChatRequest) -> Result<()> {
+    let mut stream = agent.chat_stream(request).await?;
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    let mut thinking = false;
+    let mut answered = false;
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                println!("\n[Request interrupted by user]");
+                return Ok(());
+            }
+            event = stream.next() => match event {
+                Some(Ok(StreamEvent::Reasoning { text })) => {
+                    if !thinking {
+                        println!("{}", dim("Thought:"));
+                        thinking = true;
+                    }
+                    print!("{}", dim(&text));
+                    io::stdout().flush()?;
+                }
+                Some(Ok(StreamEvent::Action { round, name, arguments })) => {
+                    // The answer and thought sections are over; start the
+                    // action trace on a fresh line.
+                    if answered || thinking {
+                        println!();
+                        answered = false;
+                        thinking = false;
+                    }
+                    let args = serde_json::to_string(&arguments).unwrap_or_default();
+                    println!("{} {}", cyan(&format!("Action (round {}):", round)), name);
+                    println!("  {}", dim(&args));
+                    io::stdout().flush()?;
+                }
+                Some(Ok(StreamEvent::Observation { round, name, output })) => {
+                    println!(
+                        "{} {}",
+                        cyan(&format!("Observation (round {}):", round)),
+                        name
+                    );
+                    for line in output.lines().take(10) {
+                        println!("  {}", dim(line));
+                    }
+                    io::stdout().flush()?;
+                }
+                Some(Ok(StreamEvent::Delta { text })) => {
+                    if !answered {
+                        // Separate the trace stages from the answer; the
+                        // answer itself needs no header.
+                        println!();
+                        thinking = false;
+                        answered = true;
+                    }
+                    print!("{}", text);
+                    io::stdout().flush()?;
+                }
+                Some(Ok(StreamEvent::Done { .. })) => {
+                    println!();
+                    return Ok(());
+                }
+                Some(Err(e)) => {
+                    println!();
+                    return Err(e.into());
+                }
+                None => {
+                    println!();
+                    return Ok(());
+                }
+            },
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "rsmgo")]
@@ -86,21 +184,31 @@ async fn main() -> Result<()> {
             let session_id = session.unwrap_or_else(|| Uuid::new_v4().to_string());
             println!("rsmgo chat session: {}", session_id);
             println!(
-                "provider: {} | model: {} | type '/quit' to exit",
+                "provider: {} | model: {} | type '/quit' (or '/exit') to exit",
                 provider, model
             );
+            let mut editor = DefaultEditor::new()?;
             loop {
-                print!("> ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
+                // rustyline edits by character (not byte), so multi-byte
+                // UTF-8 input like Chinese is deleted and navigated
+                // correctly; read line's byte-based editing garbles it.
+                let input = match editor.readline("> ") {
+                    Ok(line) => line,
+                    // Ctrl-C / Ctrl-D: leave the chat without an error trace.
+                    Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
+                    Err(e) => {
+                        eprintln!("input error: {}", e);
+                        break;
+                    }
+                };
                 let input = input.trim();
-                if input == "/quit" {
+                if input == "/quit" || input == "/exit" {
                     break;
                 }
                 if input.is_empty() {
                     continue;
                 }
+                let _ = editor.add_history_entry(input);
 
                 let request = ChatRequest {
                     session_id: session_id.clone(),
@@ -108,15 +216,13 @@ async fn main() -> Result<()> {
                     provider: provider.clone(),
                     model: model.clone(),
                     tool_names: vec![],
-                    stream: false,
+                    stream: true,
                     workspace: String::new(),
                     workspace_id: String::new(),
                 };
 
-                match agent.chat(request).await {
-                    Ok(resp) => {
-                        println!("{}", resp.message.content);
-                    }
+                match stream_turn(agent.clone(), request).await {
+                    Ok(()) => {}
                     Err(e) => {
                         eprintln!("Error: {}", e);
                     }

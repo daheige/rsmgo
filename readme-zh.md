@@ -375,6 +375,18 @@ cargo run -p rsmgo-cli -- chat
 cargo run -p rsmgo-cli -- run "用 Rust 写一个快速排序"
 ```
 
+对于命令行运行rsmgo，建议编译后运行，效果如下：
+```shell
+cargo build --bin rsmgo
+target/debug/rsmgo chat
+```
+创建一个聊天，此时我们可以直接使用 rsmgo
+```ini
+rsmgo chat session: c76a8d93-b2b9-433b-9a43-8aacbe73a28e
+provider: deepseek | model:  | type '/quit' to exit
+> nodejs是什么？
+```
+
 ## 工作区 workspace 运行方式
 
 工作区是一个本地目录，Agent 会把它当作自己的真正工作目录，直接在其中读写文件、执行命令。使用步骤如下：

@@ -186,12 +186,47 @@ impl Engine for EngineService {
 
         let mapped = stream.map(move |item| {
             item.map(|ev| match ev {
+                StreamEvent::Reasoning { text } => ChatStreamChunk {
+                    session_id: sid.clone(),
+                    delta: String::new(),
+                    done: false,
+                    message: None,
+                    tool_calls: vec![],
+                    reasoning: text,
+                    ..Default::default()
+                },
                 StreamEvent::Delta { text } => ChatStreamChunk {
                     session_id: sid.clone(),
                     delta: text,
                     done: false,
                     message: None,
                     tool_calls: vec![],
+                    reasoning: String::new(),
+                    ..Default::default()
+                },
+                StreamEvent::Action {
+                    round,
+                    name,
+                    arguments,
+                } => ChatStreamChunk {
+                    session_id: sid.clone(),
+                    stage: "action".to_string(),
+                    tool_name: name,
+                    tool_arguments: arguments.to_string(),
+                    round: round as u32,
+                    ..Default::default()
+                },
+                StreamEvent::Observation {
+                    round,
+                    name,
+                    output,
+                } => ChatStreamChunk {
+                    session_id: sid.clone(),
+                    stage: "observation".to_string(),
+                    tool_name: name,
+                    observation: output,
+                    round: round as u32,
+                    ..Default::default()
                 },
                 StreamEvent::Done { response } => ChatStreamChunk {
                     session_id: response.session_id,
@@ -199,6 +234,8 @@ impl Engine for EngineService {
                     done: true,
                     message: Some(map_message(&response.message)),
                     tool_calls: response.tool_calls.iter().map(map_tool_call).collect(),
+                    reasoning: String::new(),
+                    ..Default::default()
                 },
             })
             .map_err(|e| Status::internal(e.to_string()))
@@ -301,6 +338,23 @@ struct ChatStreamChunkJson {
     message: Option<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    reasoning: String,
+    /// ReAct agent-loop stage: "action" or "observation" when set.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    stage: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tool_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tool_arguments: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    observation: String,
+    #[serde(skip_serializing_if = "u32_is_zero")]
+    round: u32,
+}
+
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 async fn http_chat_stream(
@@ -323,6 +377,12 @@ async fn http_chat_stream(
             done: true,
             message: Some(resp.message),
             error: None,
+            reasoning: String::new(),
+            stage: String::new(),
+            tool_name: String::new(),
+            tool_arguments: String::new(),
+            observation: String::new(),
+            round: 0,
         };
         let data = serde_json::to_string(&chunk).unwrap_or_default();
         let stream = futures::stream::once(async move { Ok(Event::default().data(data)) });
@@ -336,12 +396,65 @@ async fn http_chat_stream(
 
     let stream = stream.map(move |item| {
         let chunk = match item {
+            Ok(StreamEvent::Reasoning { text }) => ChatStreamChunkJson {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                done: false,
+                message: None,
+                error: None,
+                reasoning: text,
+                stage: String::new(),
+                tool_name: String::new(),
+                tool_arguments: String::new(),
+                observation: String::new(),
+                round: 0,
+            },
             Ok(StreamEvent::Delta { text }) => ChatStreamChunkJson {
                 session_id: session_id.clone(),
                 delta: text,
                 done: false,
                 message: None,
                 error: None,
+                reasoning: String::new(),
+                stage: String::new(),
+                tool_name: String::new(),
+                tool_arguments: String::new(),
+                observation: String::new(),
+                round: 0,
+            },
+            Ok(StreamEvent::Action {
+                round,
+                name,
+                arguments,
+            }) => ChatStreamChunkJson {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                done: false,
+                message: None,
+                error: None,
+                reasoning: String::new(),
+                stage: "action".to_string(),
+                tool_name: name,
+                tool_arguments: arguments.to_string(),
+                observation: String::new(),
+                round: round as u32,
+            },
+            Ok(StreamEvent::Observation {
+                round,
+                name,
+                output,
+            }) => ChatStreamChunkJson {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                done: false,
+                message: None,
+                error: None,
+                reasoning: String::new(),
+                stage: "observation".to_string(),
+                tool_name: name,
+                tool_arguments: String::new(),
+                observation: output,
+                round: round as u32,
             },
             Ok(StreamEvent::Done { response }) => ChatStreamChunkJson {
                 session_id: response.session_id,
@@ -349,6 +462,12 @@ async fn http_chat_stream(
                 done: true,
                 message: Some(response.message),
                 error: None,
+                reasoning: String::new(),
+                stage: String::new(),
+                tool_name: String::new(),
+                tool_arguments: String::new(),
+                observation: String::new(),
+                round: 0,
             },
             Err(e) => ChatStreamChunkJson {
                 session_id: session_id.clone(),
@@ -356,6 +475,12 @@ async fn http_chat_stream(
                 done: false,
                 message: None,
                 error: Some(e.to_string()),
+                reasoning: String::new(),
+                stage: String::new(),
+                tool_name: String::new(),
+                tool_arguments: String::new(),
+                observation: String::new(),
+                round: 0,
             },
         };
         let data = serde_json::to_string(&chunk).unwrap_or_default();

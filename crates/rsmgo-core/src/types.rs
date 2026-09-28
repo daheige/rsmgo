@@ -118,12 +118,32 @@ pub struct ChatResponse {
     pub usage: Usage,
 }
 
-/// A single event emitted while streaming an agent response. `Delta` carries a
-/// slice of the assistant's text; `Done` carries the complete final response
-/// (which may include structured tool calls when the model decided to act).
+/// A single event emitted while streaming an agent response. Together they
+/// trace the ReAct agent loop in English-labeled stages:
+///
+/// - `Reasoning`: the model's thinking (Thought) before it acts
+/// - `Action`: a tool the agent decided to call, with its arguments
+/// - `Observation`: the result the tool returned
+/// - `Delta`: a slice of the assistant's final answer text
+/// - `Done`: the complete final response (Final Answer), which may include
+///   structured tool calls when the model decided to act
+///
+/// Reasoning/Action/Observation repeat in a loop until the model produces a
+/// final answer; `round` counts the loop iteration (1-based).
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    Reasoning { text: String },
     Delta { text: String },
+    Action {
+        round: usize,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    Observation {
+        round: usize,
+        name: String,
+        output: String,
+    },
     Done { response: ChatResponse },
 }
 

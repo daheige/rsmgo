@@ -30,6 +30,25 @@ export interface ChatStreamChunk {
   done?: boolean;
   message?: Message;
   error?: string;
+  // ReAct agent-loop stages. The engine speaks snake_case; the Go control
+  // plane re-marshals the proto with camelCase — accept both.
+  reasoning?: string;
+  stage?: string;
+  tool_name?: string;
+  toolName?: string;
+  tool_arguments?: string;
+  toolArguments?: string;
+  observation?: string;
+  round?: number;
+}
+
+/// One traceable step of the agent loop: Thought (reasoning), Action (tool
+/// call) or Observation (tool result). `round` is the 1-based loop iteration.
+export interface AgentStep {
+  kind: "thought" | "action" | "observation";
+  round: number;
+  title: string;
+  detail: string;
 }
 
 export interface ToolInfo {
@@ -144,7 +163,9 @@ export async function cancelChat(id: string): Promise<void> {
 
 // Stream a chat request over Server-Sent Events. `onDelta` fires for each text
 // fragment as it arrives; `onDone` fires once with the complete assistant
-// message. Unlike `chat`, this does not buffer the whole response up front.
+// message; `onStep` fires for each ReAct loop stage (Thought / Action /
+// Observation). Unlike `chat`, this does not buffer the whole response up
+// front.
 export async function chatStream(
   id: string,
   content: string,
@@ -152,6 +173,7 @@ export async function chatStream(
   signal: AbortSignal,
   onDelta: (delta: string) => void,
   onDone: (message: Message) => void,
+  onStep?: (step: AgentStep) => void,
 ): Promise<void> {
   const res = await fetch(`${baseUrl()}/api/v1/sessions/${id}/chat`, {
     method: "POST",
@@ -197,6 +219,17 @@ export async function chatStream(
       if (chunk.error) throw new Error(chunk.error);
       if (chunk.done && chunk.message) {
         onDone(chunk.message);
+      } else if (onStep && chunk.stage) {
+        const toolName = chunk.tool_name ?? chunk.toolName ?? "";
+        const toolArgs = chunk.tool_arguments ?? chunk.toolArguments ?? "";
+        onStep({
+          kind: chunk.stage === "action" ? "action" : "observation",
+          round: chunk.round ?? 0,
+          title: toolName,
+          detail: chunk.stage === "action" ? toolArgs : (chunk.observation ?? ""),
+        });
+      } else if (onStep && chunk.reasoning) {
+        onStep({ kind: "thought", round: 0, title: "Thought", detail: chunk.reasoning });
       } else if (typeof chunk.delta === "string" && chunk.delta) {
         onDelta(chunk.delta);
       }

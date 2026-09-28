@@ -17,6 +17,7 @@ interface DownloadLink {
 // Some providers return escape sequences (\n, \t, \") literally inside message
 // content. Convert them back to real characters so Markdown renders correctly.
 const unescapeContent = (content: string): string => {
+  if (!content) return "";
   return content
     .replace(/\\n/g, "\n")
     .replace(/\\t/g, "\t")
@@ -178,6 +179,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [streamingText, setStreamingText] = useState("");
+  const [steps, setSteps] = useState<api.AgentStep[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -198,9 +200,20 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
     toolsInitialized.current = true;
   }, [tools]);
 
+  // Follow the stream: scroll to the bottom on new content, but only when the
+  // user is already near the bottom (so reading scrolled-up history is not
+  // interrupted), and without smooth animation — a smooth-scroll animation
+  // restarts on every streamed token and makes the page visibly jitter.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading, streamingText]);
+    const el = bottomRef.current;
+    const container = el?.parentElement;
+    if (!el || !container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom < 120) {
+      el.scrollIntoView({ behavior: "auto" });
+    }
+  }, [messages, loading, streamingText, steps]);
 
   // Reset the textarea to the default height on mount so the browser does not
   // restore a previously resized height.
@@ -212,11 +225,24 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
 
   const canSend = !loading && (input.trim().length > 0 || attachments.length > 0);
 
+  // Append a ReAct loop step; consecutive Thought fragments merge into one
+  // running Thought block.
+  const appendStep = (step: api.AgentStep) => {
+    setSteps((prev) => {
+      const last = prev[prev.length - 1];
+      if (step.kind === "thought" && last?.kind === "thought") {
+        return [...prev.slice(0, -1), { ...last, detail: last.detail + step.detail }];
+      }
+      return [...prev, step];
+    });
+  };
+
   const submitChat = async (content: string, opts: api.ChatOptions) => {
     if (!sessionId) return;
     setLoading(true);
     setError(null);
     setStreamingText("");
+    setSteps([]);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -227,6 +253,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
         controller.signal,
         (delta) => setStreamingText((prev) => prev + delta),
         (message) => setMessages((prev) => [...prev, message]),
+        appendStep,
       );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
@@ -320,7 +347,7 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
         {messages.map((m, i) => {
           const displayContent =
             m.role === "assistant"
-              ? normalizeFileLinks(unescapeContent(m.content))
+              ? normalizeFileLinks(unescapeContent(m.content ?? ""))
               : m.content;
           const downloads =
             m.role === "assistant" ? extractDownloads(displayContent) : [];
@@ -435,22 +462,52 @@ export default function Chat({ sessionId, tools = [] }: ChatProps) {
             </div>
           );
         })}
-        {loading &&
-          (streamingText ? (
-            <div
-              style={{
-                ...styles.message,
-                alignSelf: "stretch",
-                background: "#1e293b",
-              }}
-            >
-              <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {streamingText}
+        {loading && (
+          <div
+            style={{
+              ...styles.message,
+              alignSelf: "stretch",
+              background: "#1e293b",
+            }}
+          >
+            {steps.length > 0 && (
+              <div style={styles.steps}>
+                {steps.map((s, i) => (
+                  <details key={i} style={styles.step} open={s.kind !== "thought"}>
+                    <summary
+                      style={{
+                        ...styles.stepTitle,
+                        color:
+                          s.kind === "action"
+                            ? "#7dd3fc"
+                            : s.kind === "observation"
+                              ? "#a5b4fc"
+                              : "#94a3b8",
+                      }}
+                    >
+                      {s.kind === "thought"
+                        ? "Thought"
+                        : `${s.kind === "action" ? "Action" : "Observation"} (round ${s.round})${
+                            s.title ? ` · ${s.title}` : ""
+                          }`}
+                    </summary>
+                    <pre style={styles.stepDetail}>{s.detail}</pre>
+                  </details>
+                ))}
               </div>
-            </div>
-          ) : (
-            <div style={styles.typing}>Thinking...</div>
-          ))}
+            )}
+            {streamingText ? (
+              <>
+                <div style={styles.finalAnswerTag}>Final Answer</div>
+                <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {streamingText}
+                </div>
+              </>
+            ) : (
+              steps.length === 0 && <div style={styles.typing}>Thinking...</div>
+            )}
+          </div>
+        )}
         {error && <div style={styles.error}>{error}</div>}
         <div ref={bottomRef} />
       </div>
@@ -603,6 +660,40 @@ const styles: Record<string, React.CSSProperties> = {
   typing: {
     color: "#94a3b8",
     fontStyle: "italic",
+  },
+  steps: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.375rem",
+    marginBottom: "0.625rem",
+  },
+  step: {
+    borderLeft: "2px solid #334155",
+    paddingLeft: "0.625rem",
+  },
+  stepTitle: {
+    cursor: "pointer",
+    fontSize: "0.8rem",
+    fontWeight: 600,
+    letterSpacing: "0.02em",
+    textTransform: "none" as const,
+  },
+  stepDetail: {
+    margin: "0.3rem 0 0.25rem",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: "0.75rem",
+    color: "#94a3b8",
+    maxHeight: "12rem",
+    overflowY: "auto",
+  },
+  finalAnswerTag: {
+    color: "#4ade80",
+    fontSize: "0.8rem",
+    fontWeight: 700,
+    letterSpacing: "0.02em",
+    marginBottom: "0.375rem",
   },
   error: {
     color: "#f87171",

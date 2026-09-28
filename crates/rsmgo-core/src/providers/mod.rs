@@ -13,6 +13,18 @@ pub mod openai;
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiCompatibleProvider;
 
+/// Byte offset of the first SSE event boundary (`\n\n`) in `buf`.
+///
+/// Stream responses must be buffered as raw bytes, not decoded chunk by
+/// chunk: a multi-byte UTF-8 character can be split across network chunks,
+/// and lossily decoding each chunk on its own would corrupt it into
+/// replacement characters. The `\n\n` delimiter is ASCII, so an event
+/// boundary can never fall inside a multi-byte sequence; the incomplete
+/// tail is left undecoded until more bytes arrive.
+pub(crate) fn sse_event_boundary(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
+
 /// A generic LLM provider trait.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {

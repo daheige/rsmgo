@@ -10,6 +10,7 @@ use headless_chrome::browser::LaunchOptions;
 use headless_chrome::protocol::cdp::Page;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Maximum time the browser may stay idle before the call is aborted.
@@ -28,6 +29,118 @@ const CHROME_CANDIDATES: &[&str] = &[
     "/usr/bin/chromium-browser",
     "/snap/bin/chromium",
 ];
+
+/// Prefix of the per-invocation Chrome profile directory. A custom prefix (not
+/// headless_chrome's default) lets us find and reap Chrome processes that were
+/// orphaned when the rsmgo process died before closing the browser.
+const PROFILE_PREFIX: &str = "rsmgo-chrome-profile";
+
+static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Unique profile directory for one browser invocation, e.g.
+/// /tmp/rsmgo-chrome-profile-<pid>-<n>.
+fn profile_dir() -> PathBuf {
+    let n = PROFILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{}-{}-{}",
+        PROFILE_PREFIX,
+        std::process::id(),
+        n
+    ))
+}
+
+/// Best-effort kill of a single PID and its descendants (SIGKILL on Unix).
+fn kill_pid_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        let pid_str = pid.to_string();
+        // `pkill -KILL -P` targets children recursively on macOS/Linux.
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-P", &pid_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Reap headless Chrome instances orphaned by a previous rsmgo process that
+/// was killed before it could close the browser. Chrome processes launched by
+/// headless_chrome are children of the rsmgo process; when rsmgo dies they are
+/// reparented to PID 1, which is how we distinguish orphans from browsers
+/// actively managed by a running rsmgo. Also removes their stale profile dirs.
+fn reap_orphaned_chrome() {
+    let _ = reap_orphaned_chrome_inner();
+}
+
+#[cfg(unix)]
+fn reap_orphaned_chrome_inner() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::process::{Command, Stdio};
+
+    let own_pid = std::process::id().to_string();
+    let out = Command::new("pgrep")
+        .args(["-f", PROFILE_PREFIX])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut killed = Vec::new();
+    for line in stdout.lines() {
+        let pid = line.trim();
+        if pid.is_empty() || pid == own_pid {
+            continue;
+        }
+        // Only reap processes reparented to init/launchd (PPID 1); anything
+        // else is owned by a live rsmgo process.
+        let ps_out = Command::new("ps")
+            .args(["-o", "ppid=", "-p", pid])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        let ppid = String::from_utf8_lossy(&ps_out.stdout).trim().to_string();
+        if ppid == "1" {
+            let _ = Command::new("pkill")
+                .args(["-KILL", "-P", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            unsafe {
+                libc::kill(pid.parse::<i32>().unwrap_or(-1), libc::SIGKILL);
+            }
+            killed.push(pid.to_string());
+        }
+    }
+    // Remove profile dirs that no longer have a live Chrome process.
+    let entries = match std::fs::read_dir(std::env::temp_dir()) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(PROFILE_PREFIX) {
+            continue;
+        }
+        let dir_pid = name
+            .trim_start_matches(PROFILE_PREFIX)
+            .trim_start_matches('-')
+            .split('-')
+            .next()
+            .unwrap_or("");
+        if dir_pid == own_pid || killed.iter().any(|k| k == dir_pid) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reap_orphaned_chrome_inner() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
 
 fn percent_encode_filename(name: &str) -> String {
     let mut out = String::new();
@@ -92,12 +205,37 @@ fn run_blocking(
     workspace_dir: &Path,
     workspace: Option<&PathBuf>,
 ) -> Result<String> {
+    // A throwaway profile keeps cookies and cache out of the user's browser.
+    // The custom prefix identifies our Chrome processes so orphaned ones (left
+    // behind when the rsmgo process dies mid-call) can be reaped on next start.
+    let profile = profile_dir();
+    if let Err(e) = std::fs::create_dir_all(&profile) {
+        return Err(RsmgoError::Tool(format!(
+            "failed to create browser profile directory: {}",
+            e
+        )));
+    }
+
+    let result = run_with_browser(&params, workspace_dir, workspace, &profile);
+
+    // Always remove the throwaway profile, however the call ended.
+    let _ = std::fs::remove_dir_all(&profile);
+    result
+}
+
+/// Launch Chrome with the given profile and run the requested action. The
+/// browser is closed deterministically before returning on every path.
+fn run_with_browser(
+    params: &RunParams,
+    workspace_dir: &Path,
+    workspace: Option<&PathBuf>,
+    profile: &Path,
+) -> Result<String> {
     let mut launch = LaunchOptions::default();
     launch.path = Some(params.chrome.clone());
     launch.window_size = Some((params.width, params.height));
     launch.idle_browser_timeout = Duration::from_millis(params.timeout_ms);
-    // A throwaway profile keeps cookies and cache out of the user's browser.
-    launch.user_data_dir = None;
+    launch.user_data_dir = Some(profile.to_path_buf());
 
     let browser = headless_chrome::Browser::new(launch).map_err(|e| {
         RsmgoError::Tool(format!(
@@ -106,6 +244,27 @@ fn run_blocking(
             e
         ))
     })?;
+    let browser_pid = browser.get_process_id();
+
+    let result = run_action(&browser, params, workspace_dir, workspace);
+
+    // Drop closes the WebSocket and asks Chrome to exit; kill the process
+    // tree as well in case the graceful close did not go through (e.g. the
+    // transport already timed out).
+    drop(browser);
+    if let Some(pid) = browser_pid {
+        kill_pid_tree(pid);
+    }
+    result
+}
+
+/// Drive one action; the caller owns browser lifetime and cleanup.
+fn run_action(
+    browser: &headless_chrome::Browser,
+    params: &RunParams,
+    workspace_dir: &Path,
+    workspace: Option<&PathBuf>,
+) -> Result<String> {
     let tab = browser
         .new_tab()
         .map_err(|e| RsmgoError::Tool(format!("failed to open a browser tab: {}", e)))?;
@@ -155,6 +314,7 @@ fn run_blocking(
         "eval" => {
             let expression = params
                 .expression
+                .clone()
                 .ok_or_else(|| RsmgoError::Tool("missing 'expression' argument".to_string()))?;
             let result = tab
                 .evaluate(&expression, true)
@@ -177,7 +337,7 @@ fn run_blocking(
                 .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
                 .map_err(|e| RsmgoError::Tool(format!("failed to capture screenshot: {}", e)))?;
 
-            let file_name = match params.output {
+            let file_name = match params.output.as_deref() {
                 Some(name) if !name.trim().is_empty() => {
                     let name = name.trim();
                     if name.contains('/') || name.contains("..") {
@@ -250,6 +410,9 @@ pub struct BrowserTool {
 
 impl BrowserTool {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
+        // Clean up Chrome instances orphaned by a previous rsmgo process that
+        // was killed before it could close its browser.
+        reap_orphaned_chrome();
         Self {
             workspace_dir: workspace_dir.into(),
         }

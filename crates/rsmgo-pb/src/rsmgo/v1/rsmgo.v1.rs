@@ -92,6 +92,23 @@ pub struct ChatStreamChunk {
     pub message: ::core::option::Option<Message>,
     #[prost(message, repeated, tag = "5")]
     pub tool_calls: ::prost::alloc::vec::Vec<ToolCall>,
+    /// thinking/reasoning delta (reasoning models)
+    #[prost(string, tag = "6")]
+    pub reasoning: ::prost::alloc::string::String,
+    /// ReAct agent-loop stages; stage is "action" or "observation" when set.
+    #[prost(string, tag = "7")]
+    pub stage: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub tool_name: ::prost::alloc::string::String,
+    /// JSON string
+    #[prost(string, tag = "9")]
+    pub tool_arguments: ::prost::alloc::string::String,
+    /// tool result text
+    #[prost(string, tag = "10")]
+    pub observation: ::prost::alloc::string::String,
+    /// 1-based agent loop iteration
+    #[prost(uint32, tag = "11")]
+    pub round: u32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Usage {

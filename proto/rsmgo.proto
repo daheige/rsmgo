@@ -73,6 +73,14 @@ message ChatStreamChunk {
   bool done = 3;
   Message message = 4;  // final message when done
   repeated ToolCall tool_calls = 5;
+  string reasoning = 6;  // thinking/reasoning delta (reasoning models)
+
+  // ReAct agent-loop stages; stage is "action" or "observation" when set.
+  string stage = 7;
+  string tool_name = 8;
+  string tool_arguments = 9;  // JSON string
+  string observation = 10;    // tool result text
+  uint32 round = 11;          // 1-based agent loop iteration
 }
 
 message Usage {

@@ -339,6 +339,10 @@ struct OpenAiStreamChoice {
 #[derive(Debug, Deserialize, Default)]
 struct OpenAiStreamDelta {
     content: Option<String>,
+    /// Thinking content, streamed separately by reasoning models such as
+    /// DeepSeek R1 before the answer deltas.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiStreamToolCall>>,
 }
 
@@ -369,10 +373,12 @@ struct OpenAiToolCallAccum {
 }
 
 /// Parse one SSE event body (the text between `\n\n` boundaries) and fold its
-/// `data:` lines into the tool-call accumulators. Returns the concatenated text
-/// content carried by the event so the caller can forward it as a `Delta`.
-fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) -> String {
+/// `data:` lines into the tool-call accumulators. Returns the concatenated
+/// answer text and reasoning text carried by the event so the caller can
+/// forward them as `Delta` / `Reasoning` events.
+fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) -> (String, String) {
     let mut appended = String::new();
+    let mut reasoning = String::new();
     for line in event.lines() {
         let line = line.trim_end_matches('\r');
         let Some(data) = line.strip_prefix("data:") else {
@@ -389,6 +395,9 @@ fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) 
             let delta = choice.delta;
             if let Some(content) = delta.content {
                 appended.push_str(&content);
+            }
+            if let Some(rc) = delta.reasoning_content {
+                reasoning.push_str(&rc);
             }
             if let Some(list) = delta.tool_calls {
                 for tc in list {
@@ -408,7 +417,7 @@ fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) 
             }
         }
     }
-    appended
+    (appended, reasoning)
 }
 
 #[async_trait]
@@ -547,7 +556,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         tokio::spawn(async move {
             let mut body = response.bytes_stream();
-            let mut buffer = String::new();
+            // Raw bytes, not String: a multi-byte UTF-8 char may be split
+            // across chunks; only decode complete SSE events (see
+            // sse_event_boundary).
+            let mut buffer: Vec<u8> = Vec::new();
             let mut text = String::new();
             let mut tcs: BTreeMap<usize, OpenAiToolCallAccum> = BTreeMap::new();
 
@@ -561,12 +573,20 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         return;
                     }
                 };
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                buffer.extend_from_slice(&bytes);
 
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event = buffer[..pos].to_string();
+                while let Some(pos) = super::sse_event_boundary(&buffer) {
+                    let event = String::from_utf8_lossy(&buffer[..pos]).into_owned();
                     buffer.drain(..pos + 2);
-                    let delta = apply_sse_event(&event, &mut tcs);
+                    let (delta, reasoning) = apply_sse_event(&event, &mut tcs);
+                    if !reasoning.is_empty()
+                        && tx
+                            .send(Ok(StreamEvent::Reasoning { text: reasoning }))
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
                     if !delta.is_empty() {
                         text.push_str(&delta);
                         if tx
@@ -582,8 +602,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
             // Flush any trailing partial event (e.g. a final line without a
             // trailing blank line).
-            if !buffer.trim().is_empty() {
-                let delta = apply_sse_event(&buffer, &mut tcs);
+            let trailing = String::from_utf8_lossy(&buffer);
+            if !trailing.trim().is_empty() {
+                let (delta, reasoning) = apply_sse_event(&trailing, &mut tcs);
+                if !reasoning.is_empty() {
+                    let _ = tx
+                        .send(Ok(StreamEvent::Reasoning { text: reasoning }))
+                        .await;
+                }
                 if !delta.is_empty() {
                     text.push_str(&delta);
                     let _ = tx.send(Ok(StreamEvent::Delta { text: delta })).await;
@@ -622,5 +648,172 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(self.models.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// Regression test: a multi-byte UTF-8 character ("关" = E5 85 B3) split
+    /// across network chunks must not be corrupted into U+FFFD replacement
+    /// characters. The stream is buffered as raw bytes and only decoded at
+    /// SSE event boundaries, so the split sequence is reassembled before
+    /// decoding.
+    #[tokio::test]
+    async fn stream_keeps_multibyte_chars_split_across_chunks() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.readable().await;
+            let _ = socket.try_read(&mut request);
+
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"我把\"}}}}]}}\n\n\
+                 data: {{\"choices\":[{{\"delta\":{{\"content\":\"关键信息\"}}}}]}}\n\n\
+                 data: [DONE]\n\n"
+            );
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            // Write byte by byte with tiny pauses so multi-byte characters
+            // land in separate network chunks.
+            for byte in head.into_bytes() {
+                socket.write_all(&[byte]).await.unwrap();
+            }
+            for byte in body.into_bytes() {
+                socket.write_all(&[byte]).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            socket.shutdown().await.unwrap();
+        });
+
+        let provider = OpenAiCompatibleProvider::new(
+            "mock",
+            format!("http://{}", addr),
+            "key".to_string(),
+            "model".to_string(),
+            vec![],
+        );
+        let request = ChatRequest {
+            session_id: "s".to_string(),
+            messages: vec![Message::user("hi")],
+            provider: "mock".to_string(),
+            model: "model".to_string(),
+            tool_names: vec![],
+            stream: true,
+            workspace: String::new(),
+            workspace_id: String::new(),
+        };
+
+        let mut stream = provider.chat_stream(request, vec![]).await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::Reasoning { .. } => panic!("no reasoning expected in this stream"),
+                StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                StreamEvent::Done { response } => text = response.message.content,
+                StreamEvent::Action { .. } | StreamEvent::Observation { .. } => {
+                    panic!("no agent stages expected from a provider stream")
+                }
+            }
+        }
+        server.await.unwrap();
+
+        assert_eq!(text, "我把关键信息", "reassembled text: {:?}", text);
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "stream corrupted a multi-byte character: {:?}",
+            text
+        );
+    }
+
+    /// Reasoning models (e.g. DeepSeek R1) stream `reasoning_content` deltas
+    /// before the answer. They must surface as `Reasoning` events, in order,
+    /// and the final message must carry only the answer text.
+    #[tokio::test]
+    async fn stream_emits_reasoning_before_answer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.readable().await;
+            let _ = socket.try_read(&mut request);
+
+            let body = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"思考\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"中\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"答案\"}}]}\n\n\
+                        data: [DONE]\n\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let provider = OpenAiCompatibleProvider::new(
+            "mock",
+            format!("http://{}", addr),
+            "key".to_string(),
+            "model".to_string(),
+            vec![],
+        );
+        let request = ChatRequest {
+            session_id: "s".to_string(),
+            messages: vec![Message::user("hi")],
+            provider: "mock".to_string(),
+            model: "model".to_string(),
+            tool_names: vec![],
+            stream: true,
+            workspace: String::new(),
+            workspace_id: String::new(),
+        };
+
+        let mut stream = provider.chat_stream(request, vec![]).await.unwrap();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        server.await.unwrap();
+
+        let mut reasoning = String::new();
+        let mut answer = String::new();
+        for ev in &events {
+            match ev {
+                StreamEvent::Reasoning { text } => reasoning.push_str(text),
+                StreamEvent::Delta { text } => answer.push_str(text),
+                StreamEvent::Done { response } => {
+                    assert_eq!(response.message.content, "答案")
+                }
+                StreamEvent::Action { .. } | StreamEvent::Observation { .. } => {
+                    panic!("no agent stages expected from a provider stream")
+                }
+            }
+        }
+        assert_eq!(reasoning, "思考中", "reasoning: {:?}", reasoning);
+        assert_eq!(answer, "答案", "answer: {:?}", answer);
+        // Reasoning must arrive before the answer starts.
+        let first_reasoning = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::Reasoning { .. }));
+        let first_delta = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::Delta { .. }));
+        assert!(
+            first_reasoning.is_some() && first_delta.is_some(),
+            "both event kinds expected: {:?}",
+            events
+        );
+        assert!(first_reasoning.unwrap() < first_delta.unwrap());
     }
 }
