@@ -48,6 +48,8 @@ impl ToolContext {
     }
 }
 
+/// tool trait for executing a tool with a given name and arguments,
+/// returning a string result.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -67,6 +69,8 @@ impl ToolDefinition {
 }
 
 pub struct ToolRegistry {
+    // tools keyed by name, for lookup and execution
+    // boxed trait objects to allow different tool implementations
     tools: HashMap<String, Box<dyn Tool>>,
 }
 
@@ -108,15 +112,7 @@ impl ToolRegistry {
             .ok_or_else(|| RsmgoError::Tool(format!("tool '{}' not found", name)))?;
         tool.execute(args, ctx).await
     }
-}
 
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        Self::with_workspace(".")
-    }
-}
-
-impl ToolRegistry {
     /// Create a registry with the built-in tools, using `workspace_dir` as the
     /// base directory for file output tools.
     pub fn with_workspace(workspace_dir: impl Into<PathBuf>) -> Self {
@@ -134,5 +130,11 @@ impl ToolRegistry {
         registry.register(Box::new(git::GitTool));
         registry.register(Box::new(browser::BrowserTool::new(workspace_dir)));
         registry
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::with_workspace(".")
     }
 }

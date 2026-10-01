@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Core types used throughout the RSMGO codebase, including messages, tool calls,
+/// chat requests/responses, stream events, tool definitions, model info, and agent configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
@@ -83,6 +85,7 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// llm usage information, including token counts for prompt, completion, and total.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
@@ -90,6 +93,8 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// Chat request sent to a provider, including session id, messages, provider/model selection,
+/// tool names, streaming flag, and optional workspace information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub session_id: String,
@@ -98,8 +103,12 @@ pub struct ChatRequest {
     pub model: String,
     #[serde(default)]
     pub tool_names: Vec<String>,
+
+    /// Whether the model should stream its response (true) or return it all at once (false).
+    /// When streaming, the provider will yield `StreamEvent` items until the final response is complete.
     #[serde(default)]
     pub stream: bool,
+
     /// Optional workspace directory path the agent should operate in.
     #[serde(default)]
     pub workspace: String,
@@ -132,8 +141,12 @@ pub struct ChatResponse {
 /// final answer; `round` counts the loop iteration (1-based).
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    Reasoning { text: String },
-    Delta { text: String },
+    Reasoning {
+        text: String,
+    },
+    Delta {
+        text: String,
+    },
     Action {
         round: usize,
         name: String,
@@ -144,9 +157,13 @@ pub enum StreamEvent {
         name: String,
         output: String,
     },
-    Done { response: ChatResponse },
+    Done {
+        response: ChatResponse,
+    },
 }
 
+/// A single tool definition, used to register a tool with the agent and
+/// provide the model with its name, description, and parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -154,6 +171,7 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// model information returned by a provider's `list_models` method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -161,6 +179,8 @@ pub struct ModelInfo {
     pub display_name: String,
 }
 
+/// provider configuration loaded from the agent config file, used to
+/// instantiate a provider and register it with the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub provider: String,
@@ -173,6 +193,7 @@ pub struct ProviderConfig {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Agent configuration loaded from the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub providers: Vec<ProviderConfig>,

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Application configuration loaded from `app.yaml`, including engine settings,
+/// provider definitions, tool configuration, MCP server entries, and control plane settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub app: AppInfo,
@@ -23,10 +25,14 @@ pub struct AppInfo {
     pub version: String,
 }
 
+/// chat stream defaults to true,
+/// meaning the control plane and HTTP debug API will stream assistant responses to the client.
 fn default_chat_stream() -> bool {
     true
 }
 
+/// engine config, including gRPC and HTTP addresses,
+/// data directory, system prompt, debug API flag, and chat streaming flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
     pub grpc_addr: String,
@@ -46,6 +52,8 @@ pub struct EngineConfig {
     pub chat_stream: bool,
 }
 
+/// llm provider entry in app.yaml, including name, API key, base URL,
+/// default model, and model list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderEntry {
     pub name: String,

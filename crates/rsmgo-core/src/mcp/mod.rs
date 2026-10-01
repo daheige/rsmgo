@@ -10,7 +10,7 @@ use crate::error::{Result, RsmgoError};
 use crate::tools::{Tool, ToolContext};
 use async_trait::async_trait;
 use rmcp::model::{
-    CallToolRequestParams, ClientInfo, ContentBlock, GetPromptRequestParams, Prompt,
+    CallToolRequestParams, ClientConfig, ContentBlock, GetPromptRequestParams, Prompt,
     ReadResourceRequestParams, Resource, ResourceContents, Role,
 };
 use rmcp::service::{RoleClient, RunningService};
@@ -23,7 +23,7 @@ use tokio::process::Command;
 /// A live, initialized MCP client connection. Both supported transports
 /// (stdio child process and Streamable HTTP) yield this same type, which
 /// keeps the handle object-safe without extra type erasure.
-type McpClient = RunningService<RoleClient, ClientInfo>;
+type McpClient = RunningService<RoleClient, ClientConfig>;
 
 /// Build the registry name for a tool imported from an MCP server.
 pub fn mcp_tool_name(server: &str, tool: &str) -> String {
@@ -54,7 +54,7 @@ async fn connect(entry: &McpServerEntry) -> Result<McpClient> {
                 cmd.args(&entry.args).envs(&entry.env);
             }))
             .map_err(|e| RsmgoError::Mcp(format!("mcp server '{}': spawn: {}", entry.name, e)))?;
-            ClientInfo::default()
+            ClientConfig::default()
                 .serve(transport)
                 .await
                 .map_err(|e| RsmgoError::Mcp(format!("mcp server '{}': init: {}", entry.name, e)))
@@ -83,7 +83,7 @@ async fn connect(entry: &McpServerEntry) -> Result<McpClient> {
                 config.custom_headers.insert(name, value);
             }
             let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(config);
-            ClientInfo::default()
+            ClientConfig::default()
                 .serve(transport)
                 .await
                 .map_err(|e| RsmgoError::Mcp(format!("mcp server '{}': init: {}", entry.name, e)))

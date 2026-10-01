@@ -1,5 +1,5 @@
 use crate::error::{Result, RsmgoError};
-use crate::providers::LlmProvider;
+use crate::providers::LLMProvider;
 use crate::types::{
     ChatRequest, ChatResponse, Message, ModelInfo, StreamEvent, ToolCall, ToolDefinition, Usage,
 };
@@ -421,7 +421,7 @@ fn apply_sse_event(event: &str, tcs: &mut BTreeMap<usize, OpenAiToolCallAccum>) 
 }
 
 #[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
+impl LLMProvider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
         &self.name
     }

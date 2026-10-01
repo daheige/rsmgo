@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use render::MarkdownRenderer;
 use rsmgo_core::agent::Agent;
 use rsmgo_core::config::AppConfig;
 use rsmgo_core::memory::MemoryStore;
@@ -13,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+mod highlight;
+mod render;
 
 /// ANSI style helpers: colors only when stdout is a terminal.
 fn styled(s: &str, code: &str) -> String {
@@ -39,12 +43,14 @@ fn cyan(s: &str) -> String {
 async fn stream_turn(agent: Arc<Agent>, request: ChatRequest) -> Result<()> {
     let mut stream = agent.chat_stream(request).await?;
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    let mut renderer = MarkdownRenderer::new();
     let mut thinking = false;
     let mut answered = false;
 
     loop {
         tokio::select! {
             _ = &mut ctrl_c => {
+                renderer.flush();
                 println!("\n[Request interrupted by user]");
                 return Ok(());
             }
@@ -61,6 +67,7 @@ async fn stream_turn(agent: Arc<Agent>, request: ChatRequest) -> Result<()> {
                     // The answer and thought sections are over; start the
                     // action trace on a fresh line.
                     if answered || thinking {
+                        renderer.flush();
                         println!();
                         answered = false;
                         thinking = false;
@@ -89,18 +96,20 @@ async fn stream_turn(agent: Arc<Agent>, request: ChatRequest) -> Result<()> {
                         thinking = false;
                         answered = true;
                     }
-                    print!("{}", text);
-                    io::stdout().flush()?;
+                    renderer.feed(&text);
                 }
                 Some(Ok(StreamEvent::Done { .. })) => {
+                    renderer.flush();
                     println!();
                     return Ok(());
                 }
                 Some(Err(e)) => {
+                    renderer.flush();
                     println!();
                     return Err(e.into());
                 }
                 None => {
+                    renderer.flush();
                     println!();
                     return Ok(());
                 }
@@ -161,6 +170,17 @@ async fn build_agent() -> Result<(Arc<Agent>, String)> {
     Ok((Arc::new(agent), default_provider))
 }
 
+/// Tools enabled by default in the CLI, mirroring the web UI: everything
+/// except `web_search`, which requires separate provider-side configuration.
+fn default_tool_names(agent: &Agent) -> Vec<String> {
+    agent
+        .list_tools()
+        .into_iter()
+        .filter(|name| *name != "web_search")
+        .map(|s| s.to_string())
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -215,7 +235,7 @@ async fn main() -> Result<()> {
                     messages: vec![Message::user(input)],
                     provider: provider.clone(),
                     model: model.clone(),
-                    tool_names: vec![],
+                    tool_names: default_tool_names(&agent),
                     stream: true,
                     workspace: String::new(),
                     workspace_id: String::new(),
@@ -244,13 +264,20 @@ async fn main() -> Result<()> {
                 messages: vec![Message::user(prompt)],
                 provider,
                 model,
-                tool_names: vec![],
+                tool_names: default_tool_names(&agent),
                 stream: false,
                 workspace: String::new(),
                 workspace_id: String::new(),
             };
             let resp = agent.chat(request).await?;
-            println!("{}", resp.message.content);
+            let mut renderer = MarkdownRenderer::new();
+            renderer.feed(&resp.message.content);
+            renderer.flush();
+            if !io::stdout().is_terminal() {
+                // Raw passthrough adds no trailing newline; keep piped
+                // output line-oriented.
+                println!();
+            }
         }
         Commands::Config => {
             println!("Providers:");

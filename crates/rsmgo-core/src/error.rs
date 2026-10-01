@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+/// Custom error type for RSMGO,
+/// used throughout the codebase to represent various error conditions.
 #[derive(Error, Debug)]
 pub enum RsmgoError {
     #[error("provider error: {0}")]

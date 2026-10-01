@@ -1,5 +1,5 @@
 use crate::error::{Result, RsmgoError};
-use crate::providers::LlmProvider;
+use crate::providers::LLMProvider;
 use crate::types::{
     ChatRequest, ChatResponse, Message, ModelInfo, StreamEvent, ToolCall, ToolDefinition, Usage,
 };
@@ -318,7 +318,7 @@ fn apply_anthropic_event(event: &str, state: &mut AnthropicStreamState) -> (Stri
 }
 
 #[async_trait]
-impl LlmProvider for AnthropicProvider {
+impl LLMProvider for AnthropicProvider {
     fn name(&self) -> &str {
         "anthropic"
     }

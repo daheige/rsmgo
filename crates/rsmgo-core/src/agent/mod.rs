@@ -22,6 +22,15 @@ they never exit and will time out. Instead write the files and tell the user how
 to start them separately.
 "#;
 
+/// Safety cap on agent tool-calling rounds, and the message used to force a
+/// plain-text wrap-up when that cap is reached mid-task (so the user receives
+/// a real answer instead of the model's mid-task narration).
+const MAX_TOOL_ROUNDS: usize = 16;
+const SUMMARY_INSTRUCTION: &str = "You have reached the maximum number of tool-calling rounds. Stop using tools and summarize what you have accomplished and any remaining steps the user should take.";
+
+/// agent that manages LLM providers, tools, and memory, and orchestrates conversations.
+/// The agent handles chat requests,
+/// executes tools, and manages the ReAct loop with tool calls and observations.
 pub struct Agent {
     providers: ProviderRegistry,
     tools: ToolRegistry,
@@ -186,30 +195,15 @@ impl Agent {
 
         // Some OpenAI-compatible providers (e.g. DeepSeek, Kimi) return tool
         // calls as DSML/XML inside message.content instead of the structured
-        // tool_calls field. When tools were requested, try to parse them so the
-        // user sees the final answer instead of raw markup.
-        if !tool_defs.is_empty() && response.tool_calls.is_empty() {
-            let dsml_calls = parse_dsml_tool_calls(&response.message.content);
-            if !dsml_calls.is_empty() {
-                tracing::info!(count = dsml_calls.len(), "parsed DSML tool calls");
-                response.message.content = strip_dsml_tool_calls(&response.message.content);
-                response.tool_calls = dsml_calls;
-            } else {
-                let inline_calls = parse_inline_tool_calls(&response.message.content);
-                if !inline_calls.is_empty() {
-                    tracing::info!(count = inline_calls.len(), "parsed inline tool calls");
-                    response.message.content = strip_inline_tool_calls(&response.message.content);
-                    response.tool_calls = inline_calls;
-                }
-            }
-        }
+        // tool_calls field. Recover them so the user sees the final answer
+        // instead of raw markup.
+        recover_embedded_tool_calls(&mut response, !tool_defs.is_empty());
 
         // Execute tool calls, feeding results back to the provider, until it
-        // stops emitting tool calls or we hit the round limit. Passing the tool
+        // stops emitting tool calls, or we hit the round limit. Passing the tool
         // definitions on every round lets DSML-tool-call providers (DeepSeek,
         // Kimi) keep calling tools in follow-up turns instead of leaking raw
         // markup or halting after the first round.
-        const MAX_TOOL_ROUNDS: usize = 8;
         let mut messages = request.messages.clone();
         for _ in 0..MAX_TOOL_ROUNDS {
             if response.tool_calls.is_empty() {
@@ -263,20 +257,29 @@ impl Agent {
             tracing::info!("calling provider with tool results");
             response = provider.chat(follow_up_request, tool_defs.clone()).await?;
 
-            // Re-parse DSML tool calls on the follow-up response too, so a
+            // Re-parse embedded tool calls on the follow-up response too, so a
             // second round of tool calls is executed rather than leaked as raw
             // markup.
-            if !tool_defs.is_empty() && response.tool_calls.is_empty() {
-                let dsml_calls = parse_dsml_tool_calls(&response.message.content);
-                if !dsml_calls.is_empty() {
-                    tracing::info!(
-                        count = dsml_calls.len(),
-                        "parsed DSML tool calls (follow-up)"
-                    );
-                    response.message.content = strip_dsml_tool_calls(&response.message.content);
-                    response.tool_calls = dsml_calls;
-                }
-            }
+            recover_embedded_tool_calls(&mut response, !tool_defs.is_empty());
+        }
+
+        // If the round cap was hit while the model still wanted to call tools,
+        // force a plain-text summary so the caller receives a real answer
+        // rather than mid-task narration.
+        if !response.tool_calls.is_empty() {
+            messages.push(Message::user(SUMMARY_INSTRUCTION));
+            let summary_request = ChatRequest {
+                session_id: request.session_id.clone(),
+                messages: messages.clone(),
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+                tool_names: Vec::new(),
+                stream: false,
+                workspace: request.workspace.clone(),
+                workspace_id: request.workspace_id.clone(),
+            };
+            response = provider.chat(summary_request, Vec::new()).await?;
+            recover_embedded_tool_calls(&mut response, false);
         }
 
         tracing::info!(
@@ -298,8 +301,6 @@ impl Agent {
         let this = self.clone();
 
         tokio::spawn(async move {
-            const MAX_TOOL_ROUNDS: usize = 8;
-
             let first = match provider
                 .chat_stream(request.clone(), tool_defs.clone())
                 .await
@@ -321,26 +322,34 @@ impl Agent {
 
             // DSML/inline fallback for providers that return tool calls inside
             // message.content (DeepSeek, Kimi).
-            if !tool_defs.is_empty() && response.tool_calls.is_empty() {
-                let dsml_calls = parse_dsml_tool_calls(&response.message.content);
-                if !dsml_calls.is_empty() {
-                    response.message.content = strip_dsml_tool_calls(&response.message.content);
-                    response.tool_calls = dsml_calls;
-                } else {
-                    let inline_calls = parse_inline_tool_calls(&response.message.content);
-                    if !inline_calls.is_empty() {
-                        response.message.content =
-                            strip_inline_tool_calls(&response.message.content);
-                        response.tool_calls = inline_calls;
-                    }
-                }
-            }
+            recover_embedded_tool_calls(&mut response, !tool_defs.is_empty());
 
             let mut messages = request.messages.clone();
-            for round in 0..MAX_TOOL_ROUNDS {
+            let mut round_no = 0usize;
+            loop {
                 if response.tool_calls.is_empty() {
                     break;
                 }
+                if round_no >= MAX_TOOL_ROUNDS {
+                    // The model is still trying to call tools; a forced summary
+                    // is issued after the loop instead.
+                    break;
+                }
+                round_no += 1;
+
+                // Text the model streamed before this round's tool call is
+                // narration, not the answer; surface it as the Thought stage so
+                // it never masquerades as the final answer.
+                let narration = response.message.content.trim().to_string();
+                if !narration.is_empty()
+                    && tx
+                        .send(Ok(StreamEvent::Reasoning { text: narration }))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+
                 let assistant_message = Message::assistant_with_tool_calls(
                     response.message.content.clone(),
                     response.tool_calls.clone(),
@@ -355,7 +364,6 @@ impl Agent {
                 messages.push(assistant_message);
 
                 let mut tool_results: Vec<Message> = Vec::new();
-                let round_no = round + 1;
                 for tc in &response.tool_calls {
                     // Trace the ReAct loop: announce the action before
                     // executing it, then report the observation.
@@ -429,16 +437,50 @@ impl Agent {
                     None => return,
                 };
 
-                // Re-parse DSML tool calls on the follow-up response too.
-                if !tool_defs.is_empty() && response.tool_calls.is_empty() {
-                    let dsml_calls = parse_dsml_tool_calls(&response.message.content);
-                    if !dsml_calls.is_empty() {
-                        response.message.content = strip_dsml_tool_calls(&response.message.content);
-                        response.tool_calls = dsml_calls;
-                    }
+                // Re-parse embedded tool calls on the follow-up response too.
+                recover_embedded_tool_calls(&mut response, !tool_defs.is_empty());
+            }
+
+            // The round cap was reached while the model still wanted to call
+            // tools. Ask it to wrap up in plain text so the user receives a
+            // real answer instead of mid-task narration.
+            if !response.tool_calls.is_empty() {
+                messages.push(Message::user(SUMMARY_INSTRUCTION));
+                let summary_request = ChatRequest {
+                    session_id: request.session_id.clone(),
+                    messages: messages.clone(),
+                    provider: request.provider.clone(),
+                    model: request.model.clone(),
+                    tool_names: Vec::new(),
+                    stream: true,
+                    workspace: request.workspace.clone(),
+                    workspace_id: request.workspace_id.clone(),
+                };
+                if let Ok(s) = provider.chat_stream(summary_request, Vec::new()).await {
+                    response = match collect_round(s, &tx).await {
+                        Some(Ok(r)) => r,
+                        Some(Err(e)) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                        None => return,
+                    };
+                    // Strip any stray DSML the model emits despite no tools.
+                    recover_embedded_tool_calls(&mut response, false);
                 }
             }
 
+            // The final round carries the answer (or the forced summary).
+            if !response.message.content.trim().is_empty()
+                && tx
+                    .send(Ok(StreamEvent::Delta {
+                        text: response.message.content.clone(),
+                    }))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             if let Err(e) = this
                 .memory
                 .add_message(&request.session_id, &response.message)
@@ -466,10 +508,17 @@ fn truncate_for_trace(output: &str) -> String {
     out
 }
 
-/// Consume one provider stream, forwarding `Delta` events downstream and
-/// returning the final `Done` response. Returns `None` when the downstream
-/// receiver is gone (client disconnected — the caller should stop), or
-/// `Some(Err(e))` when the stream errored before a `Done` arrived.
+/// Consume one provider stream, forwarding only `Reasoning` (thinking) events
+/// downstream and returning the final `Done` response. Content `Delta`s are
+/// deliberately NOT forwarded: a provider like DeepSeek streams narration
+/// before a tool call, which must not be shown as the answer. The full text
+/// lives in the `Done` response's `message.content`; the caller classifies it
+/// (narration when a tool call follows, otherwise the final answer) after
+/// `recover_embedded_tool_calls` has stripped any embedded markup.
+///
+/// Returns `None` when the downstream receiver is gone (client disconnected —
+/// the caller should stop), or `Some(Err(e))` when the stream errored before a
+/// `Done` arrived.
 async fn collect_round(
     mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     tx: &tokio::sync::mpsc::Sender<Result<StreamEvent>>,
@@ -480,19 +529,11 @@ async fn collect_round(
             // provider stream; ignore defensively.
             Ok(StreamEvent::Action { .. }) | Ok(StreamEvent::Observation { .. }) => {}
             Ok(StreamEvent::Reasoning { text }) => {
-                if tx
-                    .send(Ok(StreamEvent::Reasoning { text }))
-                    .await
-                    .is_err()
-                {
+                if tx.send(Ok(StreamEvent::Reasoning { text })).await.is_err() {
                     return None;
                 }
             }
-            Ok(StreamEvent::Delta { text }) => {
-                if tx.send(Ok(StreamEvent::Delta { text })).await.is_err() {
-                    return None;
-                }
-            }
+            Ok(StreamEvent::Delta { .. }) => {}
             Ok(StreamEvent::Done { response }) => return Some(Ok(response)),
             Err(e) => return Some(Err(e)),
         }
@@ -507,82 +548,176 @@ async fn collect_round(
 /// DeepSeek and some other OpenAI-compatible providers return tool calls as
 /// DSML markup inside `message.content` rather than the structured `tool_calls`
 /// field. Each tag is wrapped in the fullwidth vertical bar U+FF5C, doubled on
-/// both sides of "DSML" (see the DSML_* delimiters below for the exact bytes).
-const DSML_TOOL_CALLS_OPEN: &str = concat!(
-    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "tool_calls",
-    "\u{3e}"
-);
-const DSML_TOOL_CALLS_CLOSE: &str = concat!(
-    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "tool_calls",
-    "\u{3e}"
-);
-const DSML_INVOKE_OPEN: &str = concat!(
-    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "invoke",
-    " name=\u{22}"
-);
-const DSML_INVOKE_CLOSE: &str = concat!(
-    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "invoke",
-    "\u{3e}"
-);
-const DSML_PARAM_OPEN: &str = concat!(
-    "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "parameter",
-    " name=\u{22}"
-);
-const DSML_PARAM_CLOSE: &str = concat!(
-    "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}",
-    "parameter",
-    "\u{3e}"
-);
+/// both sides of "DSML". Models are inconsistent about the exact spelling —
+/// both `<｜｜DSML｜｜tool_calls>` and `<｜｜DSML｜｜ calls>` (with a space)
+/// occur in the wild — so the scanner tolerates optional ASCII whitespace
+/// between the marker and the tag name, and after the closing slash.
+const DSML_MARKER: &str = "\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}";
+
+/// A single DSML tag found in model output, e.g. `<｜｜DSML｜｜invoke
+/// name="execute_command">` or `</｜｜DSML｜｜ calls>`.
+struct DsmlTag<'a> {
+    name: &'a str,
+    is_close: bool,
+    /// Text right after the tag name through the closing `>`; for open tags
+    /// this holds the attributes (e.g. ` name="execute_command">`).
+    rest: &'a str,
+    start: usize,
+    end: usize,
+}
+
+/// Find the next DSML tag at or after `from`. Returns `None` when no complete
+/// tag remains — including when the string ends inside a partial tag, so
+/// streaming callers can keep that tail buffered until more bytes arrive.
+fn find_dsml_tag(s: &str, from: usize) -> Option<DsmlTag<'_>> {
+    let mut search = from;
+    while let Some(rel) = s.get(search..)?.find('<') {
+        let start = search + rel;
+        let after_lt = start + 1;
+        let bytes = s.get(after_lt..)?.as_bytes();
+        let (is_close, tag_from) = match bytes.first() {
+            Some(b'/') => (true, after_lt + 1),
+            Some(_) => (false, after_lt),
+            None => return None,
+        };
+        if !s.get(tag_from..)?.starts_with(DSML_MARKER) {
+            search = start + 1;
+            continue;
+        }
+        let mut p = tag_from + DSML_MARKER.len();
+        // Skip optional whitespace between the marker and the tag name.
+        while let Some(c) = s.get(p..)?.chars().next() {
+            if c.is_ascii_whitespace() {
+                p += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        // Read the tag name: ASCII identifier characters only, so multibyte
+        // text can never be swallowed into a name.
+        let name_start = p;
+        while let Some(c) = s.get(p..)?.chars().next() {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                p += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if p == name_start {
+            // The buffer ended right after the marker (or its whitespace):
+            // the tag may continue in the next chunk.
+            if p >= s.len() {
+                return None;
+            }
+            search = start + 1;
+            continue;
+        }
+        let Some(gt_rel) = s.get(p..)?.find('>') else {
+            // Unterminated tag: the string ends mid-tag. Report "no complete
+            // tag" so the caller keeps the partial tail buffered.
+            return None;
+        };
+        let end = p + gt_rel + 1;
+        return Some(DsmlTag {
+            name: &s[name_start..p],
+            is_close,
+            rest: &s[p..end],
+            start,
+            end,
+        });
+    }
+    None
+}
+
+/// Extract a `name="value"` attribute from the tail of an open DSML tag.
+fn dsml_tag_attr<'a>(rest: &'a str, attr: &str) -> Option<&'a str> {
+    let needle = format!("{}=\"", attr);
+    let idx = rest.find(&needle)?;
+    let value_start = idx + needle.len();
+    let value_end = rest[value_start..].find('"')?;
+    Some(&rest[value_start..value_start + value_end])
+}
+
+/// Whether the enclosing block uses the `calls` tag name (vs `tool_calls`).
+fn is_calls_tag(name: &str) -> bool {
+    name == "calls" || name == "tool_calls"
+}
 
 fn parse_dsml_tool_calls(content: &str) -> Vec<ToolCall> {
-    let Some(start) = content.find(DSML_TOOL_CALLS_OPEN) else {
-        return Vec::new();
-    };
-    let Some(end) = content[start..].find(DSML_TOOL_CALLS_CLOSE) else {
-        return Vec::new();
-    };
-    let block = &content[start..start + end + DSML_TOOL_CALLS_CLOSE.len()];
-
     let mut calls = Vec::new();
-    let mut search_from = 0;
-    while let Some(inv_start) = block[search_from..].find(DSML_INVOKE_OPEN) {
-        let inv_start_abs = search_from + inv_start;
-        let after_name = &block[inv_start_abs + DSML_INVOKE_OPEN.len()..];
-        let Some(name_end) = after_name.find("\u{22}\u{3e}") else {
+
+    // Locate the enclosing `<｜｜DSML｜｜tool_calls>` open tag.
+    let mut open = None;
+    let mut from = 0;
+    while let Some(tag) = find_dsml_tag(content, from) {
+        if !tag.is_close && is_calls_tag(tag.name) {
+            open = Some(tag);
+            break;
+        }
+
+        from = tag.end;
+    }
+    let Some(open) = open else {
+        return calls;
+    };
+
+    from = open.end;
+    while let Some(tag) = find_dsml_tag(content, from) {
+        if tag.is_close && is_calls_tag(tag.name) {
+            break;
+        }
+        from = tag.end;
+        if tag.is_close || tag.name != "invoke" {
+            continue;
+        }
+        let Some(name) = dsml_tag_attr(tag.rest, "name") else {
+            continue;
+        };
+
+        // The invoke body runs until the matching close tag.
+        let mut body_end = None;
+        let mut inner_from = tag.end;
+        while let Some(t2) = find_dsml_tag(content, inner_from) {
+            if t2.is_close && t2.name == "invoke" {
+                body_end = Some(t2.start);
+                from = t2.end;
+                break;
+            }
+            inner_from = t2.end;
+        }
+        let Some(body_end) = body_end else {
             break;
         };
-        let name = &after_name[..name_end];
-        let body_start = inv_start_abs + DSML_INVOKE_OPEN.len() + name_end + 2;
-        let Some(body_end_rel) = block[body_start..].find(DSML_INVOKE_CLOSE) else {
-            break;
-        };
-        let body = &block[body_start..body_start + body_end_rel];
+        let body = &content[tag.end..body_end];
 
         let mut args = serde_json::Map::new();
-        let mut param_from = 0;
-        while let Some(p_start) = body[param_from..].find(DSML_PARAM_OPEN) {
-            let p_start_abs = param_from + p_start;
-            let after_pname = &body[p_start_abs + DSML_PARAM_OPEN.len()..];
-            let Some(pname_end) = after_pname.find("\u{22}") else {
+        let mut pfrom = 0;
+        while let Some(ptag) = find_dsml_tag(body, pfrom) {
+            pfrom = ptag.end;
+            if ptag.is_close || ptag.name != "parameter" {
+                continue;
+            }
+            let Some(pname) = dsml_tag_attr(ptag.rest, "name") else {
+                continue;
+            };
+            // The parameter value runs until the matching close tag.
+            let mut val_end = None;
+            let mut vfrom = ptag.end;
+            while let Some(t3) = find_dsml_tag(body, vfrom) {
+                if t3.is_close && t3.name == "parameter" {
+                    val_end = Some(t3.start);
+                    pfrom = t3.end;
+                    break;
+                }
+                vfrom = t3.end;
+            }
+            let Some(val_end) = val_end else {
                 break;
             };
-            let pname = &after_pname[..pname_end];
-            let pvalue_start_offset = find_tag_end(after_pname, pname_end);
-            let pvalue_start = p_start_abs + DSML_PARAM_OPEN.len() + pvalue_start_offset;
-            let Some(pvalue_end_rel) = body[pvalue_start..].find(DSML_PARAM_CLOSE) else {
-                break;
-            };
-            let pvalue = &body[pvalue_start..pvalue_start + pvalue_end_rel];
             args.insert(
                 pname.to_string(),
-                serde_json::Value::String(pvalue.to_string()),
+                serde_json::Value::String(body[ptag.end..val_end].to_string()),
             );
-            param_from = pvalue_start + pvalue_end_rel + DSML_PARAM_CLOSE.len();
         }
 
         calls.push(ToolCall {
@@ -590,41 +725,91 @@ fn parse_dsml_tool_calls(content: &str) -> Vec<ToolCall> {
             name: name.to_string(),
             arguments: serde_json::Value::Object(args),
         });
-        search_from = body_start + body_end_rel + DSML_INVOKE_CLOSE.len();
     }
     calls
 }
 
-/// Find the position right after the closing `>` of a parameter opening tag.
-fn find_tag_end(after_pname: &str, name_end: usize) -> usize {
-    let mut i = name_end;
-    let bytes = after_pname.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'>' {
-            return i + 1;
+/// Remove DSML tool-call blocks from content so they are not rendered to the
+/// user. Multiple blocks are supported; surviving segments are trimmed and
+/// joined with a blank line.
+fn strip_dsml_tool_calls(content: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    let mut from = 0;
+    loop {
+        // Find the next open calls tag.
+        let mut open = None;
+        let mut search = from;
+        while let Some(tag) = find_dsml_tag(content, search) {
+            if !tag.is_close && is_calls_tag(tag.name) {
+                open = Some(tag);
+                break;
+            }
+            search = tag.end;
         }
-        i += 1;
+        let Some(open) = open else {
+            segments.push(&content[from..]);
+            break;
+        };
+        segments.push(&content[from..open.start]);
+        // Find its close; an unterminated block drops the rest of the text.
+        let mut close_end = None;
+        let mut search = open.end;
+        while let Some(tag) = find_dsml_tag(content, search) {
+            if tag.is_close && is_calls_tag(tag.name) {
+                close_end = Some(tag.end);
+                break;
+            }
+            search = tag.end;
+        }
+        match close_end {
+            Some(end) => from = end,
+            None => break,
+        }
     }
-    name_end
+    let joined = segments
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    joined
 }
 
-/// Remove DSML tool-call blocks from content so they are not rendered to the user.
-fn strip_dsml_tool_calls(content: &str) -> String {
-    let Some(start) = content.find(DSML_TOOL_CALLS_OPEN) else {
-        return content.to_string();
-    };
-    let Some(end) = content[start..].find(DSML_TOOL_CALLS_CLOSE) else {
-        return content.to_string();
-    };
-    let end_abs = start + end + DSML_TOOL_CALLS_CLOSE.len();
-    let before = content[..start].trim_end();
-    let after = content[end_abs..].trim_start();
-    if before.is_empty() {
-        after.to_string()
-    } else if after.is_empty() {
-        before.to_string()
+/// Recover tool calls that providers embed in `message.content` — DSML/XML
+/// blocks (DeepSeek, Kimi) or inline `name:{json}` calls — stripping the
+/// markup so raw tags never reach the user.
+///
+/// When no tools were exposed for the request, the parsed calls are dropped
+/// rather than executed (the caller asked for a plain chat), but the content
+/// is still cleaned up.
+fn recover_embedded_tool_calls(response: &mut ChatResponse, tools_exposed: bool) {
+    if !response.tool_calls.is_empty() {
+        return;
+    }
+    let dsml_calls = parse_dsml_tool_calls(&response.message.content);
+    let inline_calls = if dsml_calls.is_empty() {
+        parse_inline_tool_calls(&response.message.content)
     } else {
-        format!("{}\n\n{}", before, after)
+        Vec::new()
+    };
+    if dsml_calls.is_empty() && inline_calls.is_empty() {
+        return;
+    }
+    let mut content = strip_dsml_tool_calls(&response.message.content);
+    content = strip_inline_tool_calls(&content);
+    response.message.content = content;
+    if tools_exposed {
+        tracing::info!(
+            count = dsml_calls.len() + inline_calls.len(),
+            "parsed embedded tool calls"
+        );
+        response.tool_calls = if !dsml_calls.is_empty() {
+            dsml_calls
+        } else {
+            inline_calls
+        };
+    } else {
+        tracing::info!("dropped embedded tool calls: no tools exposed for this request");
     }
 }
 
@@ -772,7 +957,7 @@ fn strip_inline_tool_calls(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::LlmProvider;
+    use crate::providers::LLMProvider;
     use crate::types::{ModelInfo, Usage};
     use async_trait::async_trait;
     use futures::stream;
@@ -784,12 +969,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl LlmProvider for MockProvider {
+    impl LLMProvider for MockProvider {
         fn name(&self) -> &str {
             "mock"
         }
 
-        async fn chat(&self, _request: ChatRequest, _tools: Vec<ToolDefinition>) -> Result<ChatResponse> {
+        async fn chat(
+            &self,
+            _request: ChatRequest,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<ChatResponse> {
             unimplemented!()
         }
 
@@ -862,6 +1051,73 @@ mod tests {
         }
     }
 
+    /// Provider whose first round streams narration (in `content`) followed by a
+    /// tool call, and whose second round returns the final answer. Mirrors how
+    /// DeepSeek-chat emits "thinking out loud" before a DSML tool call.
+    struct NarratingProvider;
+
+    #[async_trait]
+    impl LLMProvider for NarratingProvider {
+        fn name(&self) -> &str {
+            "narrating"
+        }
+
+        async fn chat(
+            &self,
+            _request: ChatRequest,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<ChatResponse> {
+            unimplemented!()
+        }
+
+        async fn chat_stream(
+            &self,
+            request: ChatRequest,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let session_id = request.session_id.clone();
+            let has_tool_round = !request.messages.iter().any(|m| m.role == "tool");
+            let events: Vec<Result<StreamEvent>> = if has_tool_round {
+                vec![
+                    Ok(StreamEvent::Delta {
+                        text: "The package.json has no type field.\n".to_string(),
+                    }),
+                    Ok(StreamEvent::Done {
+                        response: ChatResponse {
+                            session_id: session_id.clone(),
+                            message: Message::assistant("The package.json has no type field."),
+                            tool_calls: vec![ToolCall {
+                                id: "call_1".to_string(),
+                                name: "stub".to_string(),
+                                arguments: serde_json::json!({}),
+                            }],
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(StreamEvent::Delta {
+                        text: "fixed".to_string(),
+                    }),
+                    Ok(StreamEvent::Done {
+                        response: ChatResponse {
+                            session_id,
+                            message: Message::assistant("fixed"),
+                            tool_calls: vec![],
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            };
+            Ok(Box::pin(stream::iter(events)))
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+    }
+
     fn test_agent(with_tool_call: bool) -> Arc<Agent> {
         let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
         let mut providers = crate::providers::ProviderRegistry::new();
@@ -905,10 +1161,19 @@ mod tests {
                 StreamEvent::Done { .. } => "done",
             })
             .collect();
-        assert_eq!(kinds, vec!["thought", "action", "observation", "answer", "done"], "{:?}", kinds);
+        assert_eq!(
+            kinds,
+            vec!["thought", "action", "observation", "answer", "done"],
+            "{:?}",
+            kinds
+        );
 
         match &stages[1] {
-            StreamEvent::Action { round, name, arguments } => {
+            StreamEvent::Action {
+                round,
+                name,
+                arguments,
+            } => {
                 assert_eq!(*round, 1);
                 assert_eq!(name, "stub");
                 assert_eq!(arguments["x"], 1);
@@ -916,13 +1181,61 @@ mod tests {
             other => panic!("expected Action, got {:?}", other),
         }
         match &stages[2] {
-            StreamEvent::Observation { round, name, output } => {
+            StreamEvent::Observation {
+                round,
+                name,
+                output,
+            } => {
                 assert_eq!(*round, 1);
                 assert_eq!(name, "stub");
                 assert_eq!(output, "stub result");
             }
             other => panic!("expected Observation, got {:?}", other),
         }
+    }
+
+    /// Narration the model streams before a tool call must surface as a Thought
+    /// (`Reasoning`) event, never as answer text — otherwise the CLI shows
+    /// mid-task reasoning ("The package.json has no type field...") as the final
+    /// answer.
+    #[tokio::test]
+    async fn narration_before_tool_call_is_thought_not_answer() {
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let mut providers = crate::providers::ProviderRegistry::new();
+        providers.register(Arc::new(NarratingProvider));
+        let mut tools = ToolRegistry::with_workspace(std::env::temp_dir());
+        tools.register(Box::new(StubTool));
+        let agent = Arc::new(
+            Agent::new(memory, std::env::temp_dir())
+                .with_providers(providers)
+                .with_tools(tools),
+        );
+        let request = ChatRequest {
+            session_id: "s".to_string(),
+            messages: vec![Message::user("fix it")],
+            provider: "narrating".to_string(),
+            model: String::new(),
+            tool_names: vec![],
+            stream: true,
+            workspace: String::new(),
+            workspace_id: String::new(),
+        };
+        let mut stream = agent.chat_stream(request).await.unwrap();
+        let mut reasoning = String::new();
+        let mut answer = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                StreamEvent::Reasoning { text } => reasoning.push_str(&text),
+                StreamEvent::Delta { text } => answer.push_str(&text),
+                _ => {}
+            }
+        }
+        assert!(
+            reasoning.contains("package.json has no type field"),
+            "narration should be thought, got reasoning: {:?}",
+            reasoning
+        );
+        assert_eq!(answer, "fixed", "answer should be only the final text");
     }
 
     #[test]
@@ -983,5 +1296,33 @@ mod tests {
 
         let stripped = strip_dsml_tool_calls(content);
         assert_eq!(stripped, "The workspace is empty.");
+    }
+
+    /// DeepSeek sometimes spells DSML tags with a space after the marker
+    /// (`<｜｜DSML｜｜ calls>` instead of `<｜｜DSML｜｜tool_calls>`). The parser
+    /// must handle both, or the tool call is never executed and raw markup
+    /// leaks into the answer.
+    #[test]
+    fn parse_dsml_tool_calls_tolerates_space_after_marker() {
+        let content = concat!(
+            "我来查一下天气。\n\n",
+            "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} calls\u{3e}\n",
+            "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} invoke name=\u{22}execute_command\u{22}\u{3e}\n",
+            "\u{3c}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} parameter name=\u{22}command\u{22} string=\u{22}true\u{22}\u{3e}",
+            "curl -s \u{27}wttr.in/Shenzhen?lang=zh&format=3\u{27}",
+            "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} parameter\u{3e}\n",
+            "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} invoke\u{3e}\n",
+            "\u{3c}\u{2f}\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} calls\u{3e}"
+        );
+        let calls = parse_dsml_tool_calls(content);
+        assert_eq!(calls.len(), 1, "calls: {:?}", calls);
+        assert_eq!(calls[0].name, "execute_command");
+        assert_eq!(
+            calls[0].arguments["command"],
+            "curl -s 'wttr.in/Shenzhen?lang=zh&format=3'"
+        );
+
+        let stripped = strip_dsml_tool_calls(content);
+        assert_eq!(stripped, "我来查一下天气。");
     }
 }

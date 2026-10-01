@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 rustyline = { workspace = true }
+termimad = { workspace = true }
 
 [[bin]]
 name = "rsmgo"

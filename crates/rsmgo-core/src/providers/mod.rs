@@ -26,8 +26,10 @@ pub(crate) fn sse_event_boundary(buf: &[u8]) -> Option<usize> {
 }
 
 /// A generic LLM provider trait.
+/// models that implement this trait can be registered with the agent and used
+/// to handle chat requests, stream responses, and list available models.
 #[async_trait]
-pub trait LlmProvider: Send + Sync {
+pub trait LLMProvider: Send + Sync {
     fn name(&self) -> &str;
 
     async fn chat(&self, request: ChatRequest, tools: Vec<ToolDefinition>) -> Result<ChatResponse>;
@@ -43,7 +45,7 @@ pub trait LlmProvider: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ModelInfo>>;
 }
 
-pub type ProviderRef = Arc<dyn LlmProvider>;
+pub type ProviderRef = Arc<dyn LLMProvider>;
 
 pub struct ProviderRegistry {
     providers: HashMap<String, ProviderRef>,

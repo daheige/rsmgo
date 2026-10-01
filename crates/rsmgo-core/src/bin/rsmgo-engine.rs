@@ -17,6 +17,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_dir = PathBuf::from(&config.engine.data_dir);
     std::fs::create_dir_all(&data_dir)?;
+
+    // Open the memory store (SQLite database) at the specified path,
+    // creating it if it doesn't exist.
     let memory = Arc::new(MemoryStore::open(data_dir.join("memory.db"))?);
 
     let providers = registry_from_config(&config);

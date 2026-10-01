@@ -143,6 +143,8 @@ fn map_chat_response(resp: ChatResponse) -> ProtoChatResponse {
     }
 }
 
+/// gRPC service implementation for the RSMGO agent, exposing methods for
+/// chat, streaming chat, tool execution, and model listing.
 #[tonic::async_trait]
 impl Engine for EngineService {
     type ChatStreamStream =
@@ -510,6 +512,7 @@ pub struct AppState {
     pub chat_stream: bool,
 }
 
+/// Build the HTTP router with the given agent and chat_stream flag.
 pub fn http_router(agent: Arc<Agent>, chat_stream: bool) -> Router {
     let state = Arc::new(AppState { agent, chat_stream });
     Router::new()
@@ -521,6 +524,7 @@ pub fn http_router(agent: Arc<Agent>, chat_stream: bool) -> Router {
         .with_state(state)
 }
 
+/// Run the gRPC and HTTP servers (http optionally) concurrently, returning when either exits.
 pub async fn run_server(
     agent: Arc<Agent>,
     grpc_addr: SocketAddr,

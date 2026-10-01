@@ -192,6 +192,8 @@ impl MemoryStore {
     }
 }
 
+/// session row representation for database queries,
+/// currently used internally by MemoryStore.
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub id: String,
