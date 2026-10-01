@@ -386,6 +386,15 @@ rsmgo chat session: c76a8d93-b2b9-433b-9a43-8aacbe73a28e
 provider: deepseek | model:  | type '/quit' to exit
 > nodejs是什么？
 ```
+命令终端运行效果如下：
+![rsmgo-cli](rsmgo-cli.png)
+
+rsmgo 相关命令说明：
+- `/providers` 命令查看所有模型提供商provider列表
+- `/provider <name>` 切换具体的模型提供商provider，例如：`/provider kimi` 表示切换到kimi provider
+- `/model` 列出当前provider所有模型列表
+- `/model <name>` 切换模型，例如：`/model kimi-k2.6` 表示切换到kimi-k2.6模型
+- `/quit` 或 `/exit` 表示退出当前chat命令终端界面
 
 ## 工作区 workspace 运行方式
 

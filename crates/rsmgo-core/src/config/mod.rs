@@ -67,6 +67,7 @@ pub struct ProviderEntry {
     pub models: Vec<ModelEntry>,
 }
 
+/// model entry in app.yaml, including id and display name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
@@ -104,6 +105,7 @@ pub struct McpServerEntry {
     pub headers: HashMap<String, String>,
 }
 
+/// Control plane configuration, including listening address and engine address.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ControlPlaneConfig {
     #[serde(default = "default_control_addr")]
@@ -121,6 +123,9 @@ fn default_engine_addr() -> String {
 }
 
 impl AppConfig {
+    /// Load configuration from the specified path, expanding environment variables
+    /// in the file (e.g., `${RSMGO_API_KEY}`)
+    /// and tilde expansion for the data directory (e.g., `~/rsmgo`).
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let content = std::fs::read_to_string(&path)
@@ -153,6 +158,7 @@ impl AppConfig {
         Self::load(path)
     }
 
+    /// default provider name is the first provider in the list, if any.
     pub fn default_provider_name(&self) -> Option<&str> {
         self.providers.first().map(|p| p.name.as_str())
     }

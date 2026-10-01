@@ -35,6 +35,72 @@ fn cyan(s: &str) -> String {
     styled(s, "36;1")
 }
 
+/// Resolve the model to use: an explicit `--model` wins, otherwise fall back
+/// to the provider's configured default model.
+fn resolve_model(config: &AppConfig, provider: &str, model: &str) -> String {
+    if !model.is_empty() {
+        return model.to_string();
+    }
+    config
+        .find_provider(provider)
+        .and_then(|p| p.default_model.clone())
+        .unwrap_or_default()
+}
+
+/// Names of all configured providers, for slash-command help text.
+fn provider_names(config: &AppConfig) -> Vec<&str> {
+    config.providers.iter().map(|p| p.name.as_str()).collect()
+}
+
+/// Models configured for a provider, for `/model` validation.
+fn model_names<'a>(config: &'a AppConfig, provider: &str) -> Vec<&'a str> {
+    config
+        .find_provider(provider)
+        .map(|p| p.models.iter().map(|m| m.id.as_str()).collect())
+        .unwrap_or_default()
+}
+
+/// Print every configured provider with its default model and model list.
+fn print_provider_list(config: &AppConfig) {
+    println!("Providers:");
+    for p in &config.providers {
+        let default = p.default_model.as_deref().unwrap_or("");
+        println!("  - {} (default: {})", p.name, default);
+        let models = p
+            .models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !models.is_empty() {
+            println!("      models: {}", models);
+        }
+    }
+}
+
+/// Compact listing of configured providers and their models, for the chat
+/// banner so users know what `--provider` / `--model` accept.
+fn provider_summary(config: &AppConfig) -> String {
+    config
+        .providers
+        .iter()
+        .map(|p| {
+            let models = p
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if models.is_empty() {
+                p.name.clone()
+            } else {
+                format!("{} ({})", p.name, models)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
 /// Stream one chat turn to stdout, tracing the ReAct agent loop in
 /// English-labeled stages: Thought (reasoning, dimmed) → Action (tool call)
 /// → Observation (tool result) → ... → Final Answer. Ctrl-C interrupts the
@@ -150,7 +216,7 @@ enum Commands {
 }
 
 /// Build the agent from app.yaml, returning it alongside the default provider.
-async fn build_agent() -> Result<(Arc<Agent>, String)> {
+async fn build_agent() -> Result<(Arc<Agent>, String, AppConfig)> {
     let config = AppConfig::load_default()?;
 
     let data_dir = PathBuf::from(&config.engine.data_dir);
@@ -167,7 +233,7 @@ async fn build_agent() -> Result<(Arc<Agent>, String)> {
         .default_provider_name()
         .unwrap_or("openai")
         .to_string();
-    Ok((Arc::new(agent), default_provider))
+    Ok((Arc::new(agent), default_provider, config))
 }
 
 /// Tools enabled by default in the CLI, mirroring the web UI: everything
@@ -188,7 +254,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let (agent, default_provider) = build_agent().await?;
+    let (agent, default_provider, config) = build_agent().await?;
 
     match cli.command {
         Commands::Chat {
@@ -196,17 +262,19 @@ async fn main() -> Result<()> {
             model,
             session,
         } => {
-            let provider = if provider.is_empty() {
+            let mut provider = if provider.is_empty() {
                 default_provider.clone()
             } else {
                 provider
             };
+            let mut model = resolve_model(&config, &provider, &model);
             let session_id = session.unwrap_or_else(|| Uuid::new_v4().to_string());
             println!("rsmgo chat session: {}", session_id);
             println!(
-                "provider: {} | model: {} | type '/quit' (or '/exit') to exit",
+                "provider: {} | model: {} | /provider <name>, /model <name>, /quit to exit",
                 provider, model
             );
+            println!("providers: {}", provider_summary(&config));
             let mut editor = DefaultEditor::new()?;
             loop {
                 // rustyline edits by character (not byte), so multi-byte
@@ -224,6 +292,65 @@ async fn main() -> Result<()> {
                 let input = input.trim();
                 if input == "/quit" || input == "/exit" {
                     break;
+                }
+                if input == "/providers" {
+                    print_provider_list(&config);
+                    continue;
+                }
+                if input == "/help" {
+                    println!("commands:");
+                    println!("  /provider <name>  switch provider (e.g. /provider kimi)");
+                    println!("  /model <name>     switch model (e.g. /model deepseek-reasoner)");
+                    println!("  /providers        list providers and their models");
+                    println!("  /quit, /exit      exit chat");
+                    continue;
+                }
+                if let Some(name) = input.strip_prefix("/provider") {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        let available = provider_names(&config).join(", ");
+                        println!("current provider: {} (available: {})", provider, available);
+                    } else if let Some(entry) = config.find_provider(name) {
+                        provider = name.to_string();
+                        model = entry.default_model.clone().unwrap_or_default();
+                        println!("switched to provider: {} | model: {}", provider, model);
+                    } else {
+                        let available = provider_names(&config).join(", ");
+                        println!("unknown provider: {} (available: {})", name, available);
+                    }
+                    continue;
+                }
+                if let Some(name) = input.strip_prefix("/model") {
+                    let name = name.trim();
+                    let known = model_names(&config, &provider);
+                    if name.is_empty() {
+                        let available = if known.is_empty() {
+                            "any".to_string()
+                        } else {
+                            known.join(", ")
+                        };
+                        println!("current model: {} (available: {})", model, available);
+                    } else if known.is_empty() || known.contains(&name) {
+                        model = name.to_string();
+                        println!("switched to model: {}", model);
+                    } else {
+                        println!(
+                            "unknown model: {} for provider {} (available: {})",
+                            name,
+                            provider,
+                            known.join(", ")
+                        );
+                    }
+                    continue;
+                }
+                // Any other `/...` input is a mistyped or unknown command; do
+                // not send it to the model.
+                if input.starts_with('/') {
+                    println!(
+                        "unknown command: {} (try /provider <name>, /model <name>, /providers, /quit)",
+                        input
+                    );
+                    continue;
                 }
                 if input.is_empty() {
                     continue;
@@ -280,10 +407,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Config => {
-            println!("Providers:");
-            for p in agent.list_providers() {
-                println!("  - {}", p);
-            }
+            print_provider_list(&config);
             println!("Tools:");
             for t in agent.list_tools() {
                 println!("  - {}", t);

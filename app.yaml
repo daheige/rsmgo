@@ -61,6 +61,10 @@ providers:
         display_name: "DeepSeek V3"
       - id: "deepseek-reasoner"
         display_name: "DeepSeek R1"
+      - id: "deepseek-flash"
+        display_name: "DeepSeek Flash"
+      - id: "deepseek-v4-pro"
+        display_name: "DeepSeek V4 Pro"
 
   # NOTE: image attachments are only sent to the model as multimodal content
   # when the selected model is vision-capable. Text-only models (e.g.
@@ -80,17 +84,25 @@ providers:
   #     - id: "qwen-vl-plus"
   #       display_name: "Qwen VL Plus (vision)"
 
+  # Kimi (Moonshot) uses an OpenAI-compatible API, so it is served by
+  # OpenAiCompatibleProvider automatically. The model ids below are the ones
+  # available on api.moonshot.cn (verify with:
+  #   curl https://api.moonshot.cn/v1/models -H "Authorization: Bearer $MOONSHOT_API_KEY"
+  # ). kimi-k2.6 and kimi-k3 support vision input and reasoning, so image
+  # attachments are forwarded to them as multimodal content.
   - name: kimi
     api_key: "${MOONSHOT_API_KEY}"
     base_url: "https://api.moonshot.cn/v1"
     default_model: "kimi-k2.6"
     models:
       - id: "kimi-k2.6"
-        display_name: "kimi-k2.6"
-      - id: "kimi-k2.5"
-        display_name: "kimi-k2.5"
+        display_name: "Kimi K2.6"
       - id: "kimi-k3"
-        display_name: "kimi-k3"
+        display_name: "Kimi K3"
+      - id: "kimi-k2.7-code"
+        display_name: "Kimi K2.7 Code"
+      - id: "kimi-k2.7-code-highspeed"
+        display_name: "Kimi K2.7 Code Highspeed"
 
   # - name: gemini
   #   api_key: "${GEMINI_API_KEY}"
