@@ -15,11 +15,12 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-#dirs = { workspace = true }
+dirs = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 rustyline = { workspace = true }
 termimad = { workspace = true }
+crossterm = { workspace = true }
 
 [[bin]]
 name = "rsmgo"

@@ -117,6 +117,7 @@ pub struct ChatRequest {
     pub workspace_id: String,
 }
 
+/// Chat response returned by a provider, including session id, message, tool calls, and usage information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub session_id: String,

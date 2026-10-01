@@ -2104,6 +2104,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
+ "dirs",
  "futures",
  "rsmgo-core",
  "rustyline",
