@@ -217,7 +217,7 @@ fn run_statement(conn: &rusqlite::Connection, sql: &str, write: bool) -> Result<
         ));
     }
 
-    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
     // No result columns → a pure modification statement; report affected rows.
     if column_names.is_empty() {

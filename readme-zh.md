@@ -117,7 +117,7 @@ graph TD
 | **控制面网关** | Go + Gin | Go 在云原生网关、HTTP 路由、并发处理方面成熟高效，Gin 框架轻量且社区活跃。 |
 | **进程间通信** | gRPC + Protocol Buffers | 控制面与引擎之间采用 gRPC 高效通信，Protobuf 提供强类型、跨语言的接口契约。 |
 | **持久化** | SQLite (rusqlite) | 轻量零配置，足以支撑本地会话与消息历史存储，无需额外数据库服务。 |
-| **MCP 接入** | rmcp 3.2.0 (Rust) / modelcontextprotocol/go-sdk (Go) | 双向接入 Model Context Protocol：Rust 引擎作为 MCP 客户端导入外部工具，Go 控制面作为 MCP 服务端对外暴露工具。 |
+| **MCP 接入** | rmcp 3.7.0 (Rust) / modelcontextprotocol/go-sdk (Go) | 双向接入 Model Context Protocol：Rust 引擎作为 MCP 客户端导入外部工具，Go 控制面作为 MCP 服务端对外暴露工具。 |
 | **Web 前端** | Next.js 16 + React 19 + TypeScript | 现代 React 全栈框架，支持 App Router、服务端渲染与良好的开发体验。 |
 | **桌面客户端** | Tauri 2 | 使用系统 WebView 内嵌前端，包体小、性能好，替代 Electron 降低资源占用。 |
 | **配置管理** | YAML + serde_yaml | 人类可读的配置格式，支持环境变量展开与主目录简写。 |
@@ -181,7 +181,7 @@ rsmgo/
 
 - Rust ≥ 1.85
 - Go ≥ 1.26
-- Node.js ≥ 20 + pnpm 9
+- Node.js ≥ 20 + pnpm 12
 - `protoc`（如需重新生成 gRPC 代码）
 
 相关工具安装步骤如下：

@@ -227,11 +227,14 @@ mod tests {
     use super::*;
 
     fn set_env(var: &str, value: &str) {
-        std::env::set_var(var, value);
+        // SAFETY: test-only helper; tests run single-threaded per process via
+        // the test harness, and each test sets a distinct RSMGO_TEST_* var.
+        unsafe { std::env::set_var(var, value) };
     }
 
     fn remove_env(var: &str) {
-        std::env::remove_var(var);
+        // SAFETY: same as set_env — single-threaded test harness, test-only vars.
+        unsafe { std::env::remove_var(var) };
     }
 
     #[test]
