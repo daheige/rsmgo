@@ -58,3 +58,4 @@ web/out/
 desktop/src-tauri/target/
 app.exam.yaml
 .next
+.DS_Store

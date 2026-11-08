@@ -1,5 +1,11 @@
 # rsmgo
 
+**Enjoying rsmgo?** If it has been even a little helpful in your work, you are warmly welcome to buy the developer a coffee — every gesture of support, no matter how small, is truly appreciated and helps keep this project going. ☕
+
+| <img src="Buy-Developer-qrcode.png" width="220" alt="Buy Developer a Coffee"> | <img src="daheige.jpg" width="220" alt="WeChat Pay"> |
+| :----------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------: |
+|                                                    <a href="https://www.paypal.com/ncp/payment/FUSYMJ46C2CTQ">Buy the developer a coffee ☕</a>                                                    |                    WeChat Pay (微信支付)                    |
+
 > A model-agnostic AI Agent infrastructure.
 
 **Language**: English | [中文](readme-zh.md)
